@@ -173,6 +173,7 @@
     background:var(--panel); border-bottom:2px solid var(--ink);
   }
   #shareBar button{flex:1; background:var(--ink); color:#fff; border:none; border-radius:10px; padding:11px 4px; font-size:12.5px; font-weight:800;}
+  #userMenuBtn{display:flex; align-items:center; justify-content:center;}
   #shareBar button.secondary{background:var(--paper); color:var(--ink); border:2px solid var(--ink);}
 
   #dialogOverlay{
@@ -1071,9 +1072,18 @@ function decodeJwt(token){
   }catch(e){ return null; }
 }
 
+var USER_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>';
+
 function updateUserMenuButton(){
   var btn = document.getElementById('userMenuBtn');
-  if(btn) btn.textContent = isSignedIn() ? 'User' : 'Sign In';
+  if(!btn) return;
+  if(isSignedIn()){
+    btn.innerHTML = USER_ICON_SVG;
+    btn.title = 'Signed in as ' + currentUserEmail;
+  } else {
+    btn.textContent = 'Sign In';
+    btn.title = '';
+  }
 }
 
 function handleGoogleCredential(response){
