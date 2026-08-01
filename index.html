@@ -175,6 +175,11 @@
   #shareBar button{flex:1; background:var(--ink); color:#fff; border:none; border-radius:10px; padding:11px 4px; font-size:12.5px; font-weight:800;}
   #userMenuArea{flex:1; display:flex; align-items:center; justify-content:center;}
   #userMenuBtn{display:flex; align-items:center; justify-content:center; width:100%;}
+  #unsyncedBanner{
+    display:none; flex:0 0 auto; background:var(--danger); color:#fff;
+    font-size:12.5px; font-weight:800; text-align:center; padding:9px 12px; cursor:pointer;
+  }
+  body.focus-mode #unsyncedBanner{display:none !important;}
   #shareBar button.secondary{background:var(--paper); color:var(--ink); border:2px solid var(--ink);}
 
   #dialogOverlay{
@@ -255,6 +260,8 @@
       <button id="userMenuBtn" style="display:none;"></button>
     </div>
   </div>
+
+  <div id="unsyncedBanner"></div>
 
   <header>
     <div id="titleRow">
@@ -994,6 +1001,10 @@ function handleSaveConflict(conflict){
   ]);
 }
 
+function hasUnsyncedChanges(){
+  return JSON.stringify(state) !== lastStableSnapshot;
+}
+
 // Periodically checks whether someone else has saved a newer version of the plan you have
 // open - not real-time sync, just a "did anything change while I wasn't looking" nudge. If
 // nothing local is unsaved, it's safe to quietly catch up. If there ARE local unsaved edits,
@@ -1009,8 +1020,7 @@ function checkForNewerVersion(){
     return res.ok ? res.json() : null;
   }).then(function(rec){
     if(!rec || !rec.lastEditedAt || rec.lastEditedAt === state.lastEditedAt) return;
-    var hasLocalChanges = JSON.stringify(state) !== lastStableSnapshot;
-    if(!hasLocalChanges){
+    if(!hasUnsyncedChanges()){
       loadCloudPlanIntoState(rec);
       toast('Updated to the latest version' + (rec.lastEditedBy ? ' (' + rec.lastEditedBy + ')' : ''));
     } else {
@@ -1018,6 +1028,39 @@ function checkForNewerVersion(){
       toast((rec.lastEditedBy || 'Someone') + ' updated this plan - your changes are still safe locally');
     }
   }).catch(function(){ /* silent - this is a non-critical background check */ });
+}
+
+// Persistent, hard-to-miss warning (not just the small cloudIndicator text) for when a device
+// has been sitting on unsynced local edits for a while - the real risk this guards against is
+// two people offline on the same plan for 30-40+ min each, diverging without either knowing.
+// Doesn't try to fix that (no auto-merge - see earlier discussion), just makes the accumulating
+// risk visible in real time so people notice and can coordinate before it becomes a conflict.
+var UNSYNCED_WARNING_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
+var unsyncedSinceAt = null; // when the current streak of unsynced edits began, or null if caught up
+var unsyncedBannerTimer = null;
+
+function updateUnsyncedBanner(){
+  if(hasUnsyncedChanges()){
+    if(!unsyncedSinceAt) unsyncedSinceAt = Date.now();
+  } else {
+    unsyncedSinceAt = null;
+  }
+  var banner = document.getElementById('unsyncedBanner');
+  if(!banner) return;
+  var staleMs = unsyncedSinceAt ? (Date.now() - unsyncedSinceAt) : 0;
+  if(unsyncedSinceAt && staleMs > UNSYNCED_WARNING_THRESHOLD_MS){
+    var mins = Math.floor(staleMs / 60000);
+    banner.textContent = '⚠ Not synced for ' + mins + ' min — changes are only on this device. Tap to retry.';
+    banner.style.display = 'block';
+  } else {
+    banner.style.display = 'none';
+  }
+}
+
+function startUnsyncedBannerTimer(){
+  if(unsyncedBannerTimer) clearInterval(unsyncedBannerTimer);
+  unsyncedBannerTimer = setInterval(updateUnsyncedBanner, 30 * 1000);
+  updateUnsyncedBanner();
 }
 
 function startPeriodicRefreshCheck(){
@@ -3748,6 +3791,11 @@ function wireUp(){
     ]);
   });
 
+  document.getElementById('unsyncedBanner').addEventListener('click', function(){
+    if(isSignedIn()) syncToCloud();
+    else requireSignInDialog('Sign in to sync your changes to the cloud.');
+  });
+
   document.getElementById('undoBtn').addEventListener('click', undo);
   document.getElementById('title').addEventListener('input', function(){
     state.title = document.getElementById('title').textContent;
@@ -3891,6 +3939,7 @@ function init(){
     updateUndoButton();
     if(window.updateWindowDefaultBadge) window.updateWindowDefaultBadge();
     startPeriodicRefreshCheck();
+    startUnsyncedBannerTimer();
   });
 }
 
