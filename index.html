@@ -41,8 +41,8 @@
   #title:focus{outline:2px solid var(--accent); background:var(--panel); white-space:normal; overflow:visible; text-overflow:clip;}
   #saveIndicator{font-size:11px; font-weight:700; color:var(--muted); flex:0 0 auto; min-width:44px; text-align:right;}
   #undoBtn{
-    flex:0 0 auto; font-size:12px; font-weight:800; color:var(--ink); background:var(--paper);
-    border:2px solid var(--ink); border-radius:8px; padding:5px 9px;
+    flex:0 0 auto; font-size:12px; font-weight:800; color:var(--accent-ink); background:var(--accent);
+    border:2px solid var(--accent); border-radius:8px; padding:5px 9px;
   }
   #undoBtn:disabled{opacity:0.35;}
   #planAddressFloat{
@@ -254,9 +254,9 @@
   <header>
     <div id="titleRow">
       <div id="title" contenteditable="true" spellcheck="false">Untitled Floor Plan</div>
-      <button id="undoBtn" disabled title="Undo last action">&#8630; Undo</button>
       <div id="saveIndicator">Saved</div>
       <div id="cloudIndicator" style="font-size:11px; font-weight:700; color:var(--muted);"></div>
+      <button id="undoBtn" disabled title="Undo last action">&#8630; Undo</button>
     </div>
     <div id="levelBar">
       <select id="levelSelect"></select>
@@ -322,7 +322,6 @@
     </div>
   </div>
 
-  <input type="file" id="fileInput" accept="application/json" style="display:none">
   <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none">
 </div>
 
@@ -908,6 +907,7 @@ function syncToCloud(){
       if(!res.ok) throw new Error('save failed: ' + res.status);
       return res.json().then(function(saved){
         state.lastEditedAt = saved.lastEditedAt;
+        lastStableSnapshot = JSON.stringify(state); // keep the "any unsaved edits?" signal accurate
         setCloudIndicator('Synced');
         return persistSet(SAVE_KEY, JSON.stringify(state));
       });
@@ -936,6 +936,40 @@ function handleSaveConflict(conflict){
   ]);
 }
 
+// Periodically checks whether someone else has saved a newer version of the plan you have
+// open - not real-time sync, just a "did anything change while I wasn't looking" nudge. If
+// nothing local is unsaved, it's safe to quietly catch up. If there ARE local unsaved edits,
+// this only warns - it never overwrites your in-progress work. Actual conflict resolution at
+// save time still goes through the existing 409/stale-data dialog either way.
+var REFRESH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+var refreshCheckTimer = null;
+
+function checkForNewerVersion(){
+  if(!isSignedIn() || !state.planId) return;
+  if(activeDragCleanup) return; // don't refresh out from under an in-progress drag/gesture
+  apiFetch('/plans/' + state.planId).then(function(res){
+    return res.ok ? res.json() : null;
+  }).then(function(rec){
+    if(!rec || !rec.lastEditedAt || rec.lastEditedAt === state.lastEditedAt) return;
+    var hasLocalChanges = JSON.stringify(state) !== lastStableSnapshot;
+    if(!hasLocalChanges){
+      loadCloudPlanIntoState(rec);
+      toast('Updated to the latest version' + (rec.lastEditedBy ? ' (' + rec.lastEditedBy + ')' : ''));
+    } else {
+      setCloudIndicator('Newer version available');
+      toast((rec.lastEditedBy || 'Someone') + ' updated this plan - your changes are still safe locally');
+    }
+  }).catch(function(){ /* silent - this is a non-critical background check */ });
+}
+
+function startPeriodicRefreshCheck(){
+  if(refreshCheckTimer) clearInterval(refreshCheckTimer);
+  refreshCheckTimer = setInterval(checkForNewerVersion, REFRESH_CHECK_INTERVAL_MS);
+  document.addEventListener('visibilitychange', function(){
+    if(document.visibilityState === 'visible') checkForNewerVersion();
+  });
+}
+
 // Pulls a full plan record (as returned by GET/PUT /plans/{id}) into working state.
 function loadCloudPlanIntoState(rec){
   applyLoadedState(rec.data || {});
@@ -956,6 +990,65 @@ function loadCloudPlanIntoState(rec){
   updateUndoButton();
   lastStableSnapshot = JSON.stringify(state);
   doSave();
+}
+
+// Fetches and opens a specific cloud plan by id - shared by the HWR Plans list, a shared
+// link's ?plan= param, and the post-sign-in retry for a shared link opened while signed out.
+function openPlanById(planId){
+  toast('Opening plan…');
+  apiFetch('/plans/'+planId).then(function(res){
+    if(!res.ok) throw new Error('load failed');
+    return res.json();
+  }).then(function(rec){
+    loadCloudPlanIntoState(rec);
+    toast('Loaded');
+  }).catch(function(){ toast('Could not open that plan'); });
+}
+
+var pendingSharedPlanId = null;
+
+// Reads ?plan=<id> off the URL (how a shared link opens a specific plan) and cleans it from
+// the address bar so a refresh doesn't keep re-triggering it. If not signed in yet, the id is
+// held and retried automatically right after sign-in completes (see handleGoogleCredential).
+function checkUrlForSharedPlan(){
+  var params = new URLSearchParams(location.search);
+  var planId = params.get('plan');
+  if(!planId) return;
+  if(window.history && history.replaceState) history.replaceState({}, '', location.pathname);
+  if(isSignedIn()){
+    openPlanById(planId);
+  } else {
+    pendingSharedPlanId = planId;
+    requireSignInDialog('Sign in to open this shared plan.');
+  }
+}
+
+// Puts a link to the current plan on the clipboard (or the OS share sheet on mobile) so it
+// can be dropped into Slack, Airtable, wherever - opening it loads this exact plan directly.
+function shareCloudLink(){
+  if(!state.planId){ toast('Nothing to share yet'); return; }
+  var url = location.origin + location.pathname + '?plan=' + encodeURIComponent(state.planId);
+  if(navigator.share){
+    navigator.share({ title: state.title || 'Floor Plan', url: url })
+      .catch(function(err){ if(err && err.name==='AbortError') return; copyLinkFallback(url); });
+  } else {
+    copyLinkFallback(url);
+  }
+}
+function copyLinkFallback(url){
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(url).then(function(){
+      toast('Link copied');
+    }).catch(function(){ promptShowLink(url); });
+  } else {
+    promptShowLink(url);
+  }
+}
+function promptShowLink(url){
+  showPromptDialog({
+    title: 'Copy this link', defaultValue: url, okLabel: 'Done',
+    onSubmit: function(){}
+  });
 }
 
 function editStatus(){
@@ -991,7 +1084,12 @@ function handleGoogleCredential(response){
   currentUserEmail = claims.email;
   updateUserMenuButton();
   toast('Signed in');
-  syncToCloud(); // catch up any edits made before sign-in completed
+  if(pendingSharedPlanId){
+    var pid = pendingSharedPlanId; pendingSharedPlanId = null;
+    openPlanById(pid);
+  } else {
+    syncToCloud(); // catch up any edits made before sign-in completed
+  }
 }
 
 function signOutUser(){
@@ -1028,6 +1126,7 @@ function requireSignInDialog(message){
     okLabel: 'Sign In',
     onConfirm: function(){
       if(window.google && google.accounts && google.accounts.id) google.accounts.id.prompt();
+      else toast('Sign-in is still loading — try again in a moment');
     }
   });
 }
@@ -3059,14 +3158,7 @@ function showHwrPlansDialog(){
       info.appendChild(nameEl); info.appendChild(metaEl);
       info.addEventListener('click', function(){
         closeDialog();
-        toast('Loading plan…');
-        apiFetch('/plans/'+p.planId).then(function(res){
-          if(!res.ok) throw new Error('load failed');
-          return res.json();
-        }).then(function(rec){
-          loadCloudPlanIntoState(rec);
-          toast('Loaded');
-        }).catch(function(){ toast('Could not load that plan'); });
+        openPlanById(p.planId);
       });
       var actionBtn = document.createElement('button');
       actionBtn.type='button';
@@ -3635,23 +3727,18 @@ function wireUp(){
     scheduleSave();
     toast('New plan started');
   }
-  // doStartNew is declared in this closure (wireUp) but the HWR Plans dialog is a top-level
-  // function and needs to call it directly, without the "save first?" confirmation - same
-  // pattern already used for updateWindowDefaultBadge elsewhere in this file.
+  // doStartNew is declared in this closure (wireUp) but top-level code (HWR Plans dialog,
+  // startNewPlanFlow) needs to call it directly - same pattern as updateWindowDefaultBadge
+  // elsewhere in this file. New always goes straight to the name-prompt flow now, no
+  // "save first?" gate: that confirmation only mattered when v1 had a single local save slot
+  // where starting new could destroy your only copy. Every plan now has a permanent cloud
+  // record (doStartNew flushes any pending save before switching), so it's redundant friction.
   window.doStartNew = doStartNew;
-  function fileNew(){
-    showMenuDialog('Start a new plan?', [
-      { label: 'Save First, Then Start New', onClick: function(){ exportJson(); startNewPlanFlow(); } },
-      { label: 'Start New Without Saving', onClick: startNewPlanFlow, danger: true }
-    ]);
-  }
 
   document.getElementById('fileMenuBtn').addEventListener('click', function(){
     showMenuDialog('File', [
       { label: 'HWR Plans\u2026', onClick: showHwrPlansDialog },
-      { label: 'New\u2026', onClick: fileNew },
-      { label: 'Save', onClick: exportJson },
-      { label: 'Open', onClick: function(){ document.getElementById('fileInput').click(); } },
+      { label: 'New\u2026', onClick: startNewPlanFlow },
       { label: 'Export\u2026', onClick: function(){
           showMenuDialog('Export', [
             { label: 'PDF', onClick: exportPdf },
@@ -3659,14 +3746,9 @@ function wireUp(){
           ]);
         }
       },
-      { label: 'Share', onClick: shareJson },
+      { label: 'Share Link', onClick: shareCloudLink },
       { label: 'Address\u2026', onClick: editAddress }
     ]);
-  });
-  document.getElementById('fileInput').addEventListener('change', function(ev){
-    var f = ev.target.files && ev.target.files[0];
-    if(f) importJsonFile(f);
-    ev.target.value = '';
   });
   document.getElementById('photoInput').addEventListener('change', function(ev){
     var f = ev.target.files && ev.target.files[0];
@@ -3691,6 +3773,9 @@ function wireUp(){
 function init(){
   wireUp();
   initGoogleAuth();
+  // Read synchronously, before any async GIS sign-in callback can fire, so a shared link's
+  // ?plan= id is captured in time even if the visitor isn't signed in yet.
+  checkUrlForSharedPlan();
   loadState(function(){
     // Every plan needs a stable cloud identity from the moment it exists, even a fresh
     // blank one nobody has saved yet - guarantees the first cloud sync creates exactly
@@ -3706,6 +3791,7 @@ function init(){
     lastStableSnapshot = JSON.stringify(state);
     updateUndoButton();
     if(window.updateWindowDefaultBadge) window.updateWindowDefaultBadge();
+    startPeriodicRefreshCheck();
   });
 }
 

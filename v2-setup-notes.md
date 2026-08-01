@@ -95,3 +95,29 @@ flow to use them is the next fast-follow, not done in this pass.
   - Any action needing sign-in (HWR Plans) now shows a real dialog with a "Sign In" button,
     not just a toast.
 - No AWS changes needed for this round - frontend only. Re-push index.html to beta and retest.
+
+## Round 3 - full cloud transition, share links, Undo styling
+- Removed Save/Open (local .json export/import) entirely, and the "Save first?" confirmation
+  on New - both were v1 holdovers from when there was only one local save slot. Every plan now
+  has a permanent cloud record, so New goes straight to the name prompt.
+- Added real Share Link: File > Share Link puts a URL like
+  https://plan.heartwoodrestore.com/?plan=<planId> on the clipboard (or native share sheet on
+  mobile). Opening that URL loads that exact plan directly (prompts sign-in first if needed,
+  then auto-opens it). This was in the original Phase 2 plan and hadn't been built yet.
+- Export (PDF/CSV) unchanged - those stay since they're one-way deliverables, not app state.
+- Undo button moved to the right of Saved/Synced status, styled orange (var(--accent)) for
+  visibility.
+- No AWS changes needed - frontend only, re-push to beta and retest.
+
+## Round 4 - periodic "newer version available" check - BUILT
+- Checks every 5 minutes, plus immediately whenever the tab/browser regains focus (Page
+  Visibility API) - catches the common "switched apps for a while" case, not just a blind timer.
+- Reuses the existing GET /plans/{id} endpoint - no new AWS/Lambda infrastructure needed.
+- If nothing is unsaved locally, quietly catches you up to the latest cloud version with a toast.
+- If you DO have unsaved local edits, it never touches them - just a toast + cloudIndicator
+  nudge. Actual conflict resolution still happens through the existing 409/stale-data dialog
+  when you next save.
+- Skips the check entirely while a drag/gesture is in progress (activeDragCleanup set), so it
+  can't interrupt active editing.
+- Deliberately NOT true collaborative merging - see prior note, that's out of scope by design.
+- No AWS changes needed - frontend only, re-push to beta and retest.
