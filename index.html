@@ -279,7 +279,7 @@
 
   <div id="tabs">
     <div class="tab active" data-tab="plan">Plan</div>
-    <div class="tab" data-tab="schedule">Window / Door Schedule</div>
+    <div class="tab" data-tab="schedule">Window Schedule</div>
   </div>
 
   <div id="views">
@@ -954,6 +954,7 @@ function syncToCloud(){
         lastStableSnapshot = JSON.stringify(state); // keep the "any unsaved edits?" signal accurate
         lastSuccessfulSyncAt = Date.now();
         unsyncedSinceAt = null; // this is what actually clears the unsynced-work banner
+        updateUnsyncedBanner(); // react immediately instead of waiting up to 30s for the next timer tick
         setCloudIndicator('Synced');
         return persistSet(SAVE_KEY, JSON.stringify(state));
       });
@@ -1127,6 +1128,7 @@ function loadCloudPlanIntoState(rec){
   lastEditAt = null;
   lastSuccessfulSyncAt = Date.now();
   unsyncedSinceAt = null;
+  updateUnsyncedBanner();
   doSave();
 }
 
@@ -2624,7 +2626,11 @@ function onPointerDown(evt){
     if(ui.mode!=='move'){ return; }
     ui.selectedLabelId = null;
     ui.selectedOpeningId = openingEl.dataset.id;
-    updateInlinePanel(); refreshSvg();
+    // Selection highlight shows immediately (refreshSvg), but updateInlinePanel() is deferred
+    // until the drag ends (see startOpeningMoveDrag's onUp) - it toggles body.focus-mode, which
+    // hides the header/tabs/toolbar and reveals the inline panel, resizing the canvas. Doing
+    // that synchronously on touch-down caused a visible layout jump right as a drag began.
+    refreshSvg();
     startOpeningMoveDrag(openingEl.dataset.id, evt);
     return;
   }
@@ -2633,7 +2639,7 @@ function onPointerDown(evt){
     if(ui.mode!=='move'){ return; }
     ui.selectedOpeningId = null;
     ui.selectedLabelId = labelEl.dataset.id;
-    updateInlinePanel(); refreshSvg();
+    refreshSvg(); // updateInlinePanel() deferred to drag end - see comment above
     startLabelMoveDrag(labelEl.dataset.id, evt);
     return;
   }
@@ -2642,7 +2648,7 @@ function onPointerDown(evt){
     if(ui.mode!=='move'){ return; }
     ui.selectedOpeningId = null; ui.selectedLabelId = null;
     ui.selectedInteriorId = interiorEl.dataset.id;
-    updateInlinePanel(); refreshSvg();
+    refreshSvg(); // updateInlinePanel() deferred to drag end - see comment above
     startInteriorMoveDrag(interiorEl.dataset.id, evt);
     return;
   }
@@ -2828,6 +2834,7 @@ function startInteriorMoveDrag(id, evt){
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     activeDragCleanup = null;
+    updateInlinePanel();
     scheduleSave();
   }
   window.addEventListener('pointermove', onMove);
@@ -2859,6 +2866,7 @@ function startLabelMoveDrag(id, evt){
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     activeDragCleanup = null;
+    updateInlinePanel();
     scheduleSave();
   }
   window.addEventListener('pointermove', onMove);
@@ -2879,6 +2887,7 @@ function startOpeningMoveDrag(id, evt){
       window.removeEventListener('pointermove', onLockedMove);
       window.removeEventListener('pointerup', onLockedUp);
       activeDragCleanup = null;
+      updateInlinePanel();
     }
     window.addEventListener('pointermove', onLockedMove);
     window.addEventListener('pointerup', onLockedUp);
@@ -2907,6 +2916,7 @@ function startOpeningMoveDrag(id, evt){
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     activeDragCleanup = null;
+    updateInlinePanel();
     buildScheduleIfActive();
     scheduleSave();
   }
@@ -3430,7 +3440,7 @@ function generateRealPdf(){
   var TITLE_CAP_OFFSET = TITLE_SIZE * 0.72;
 
   // Same header block on every page: logo, title, address, date, then a page-specific
-  // label (the level name, or "Window / Door Schedule"). Returns the y to start content at.
+  // label (the level name, or "Window Schedule"). Returns the y to start content at.
   function drawPdfPageHeader(pageLabel){
     try{ doc.addImage(COMPANY_LOGO_DATA_URL, 'PNG', pageW-margin-LOGO_W, margin-TITLE_CAP_OFFSET, LOGO_W, LOGO_H); }catch(e){}
 
@@ -3486,7 +3496,7 @@ function generateRealPdf(){
     });
 
     doc.addPage();
-    var yy = drawPdfPageHeader('Window / Door Schedule');
+    var yy = drawPdfPageHeader('Window Schedule');
 
     // colsMeta[0] is the synthetic Level column; the rest mirror allColumnsForDisplay().
     var colsMeta = [{key:'__level', label:'Level', kind:'text'}].concat(allColumnsForDisplay().map(function(c){
@@ -3526,7 +3536,7 @@ function generateRealPdf(){
       doc.setDrawColor(200,200,200);
       doc.line(margin, yy+rowH-3, pageW-margin, yy+rowH-3);
       yy += rowH;
-      if(yy > pageH - margin){ doc.addPage(); yy = drawPdfPageHeader('Window / Door Schedule'); }
+      if(yy > pageH - margin){ doc.addPage(); yy = drawPdfPageHeader('Window Schedule'); }
     }
 
     drawRow(colsMeta, colsMeta.map(function(c){ return c.label; }), true, false);
@@ -3883,6 +3893,7 @@ function wireUp(){
     lastEditAt = null;
     lastSuccessfulSyncAt = null;
     unsyncedSinceAt = null;
+    updateUnsyncedBanner();
     // columnVisibility and customColumns are intentionally preserved across projects.
     undoStack = [];
     updateUndoButton();
