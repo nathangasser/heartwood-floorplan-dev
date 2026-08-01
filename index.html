@@ -845,7 +845,21 @@ function persistGet(key){
   });
 }
 
+// Timestamp of the most recent edit and the most recent successful CLOUD sync. Deliberately
+// separate from lastStableSnapshot below, which only tracks whether state has been flushed to
+// LOCAL storage - that happens every 500ms regardless of whether the cloud sync succeeds, so it
+// can't be used to detect "this device hasn't reached the cloud in a while" (that was the bug:
+// the unsynced-work banner never fired because lastStableSnapshot always caught up locally
+// within 500ms even while fully offline, making hasUnsyncedChanges() go false immediately).
+var lastEditAt = null;
+var lastSuccessfulSyncAt = null;
+var unsyncedSinceAt = null; // when the current streak of edits-not-yet-in-the-cloud began
+
 function scheduleSave(){
+  lastEditAt = Date.now();
+  // Mark the start of an unsynced streak the moment it begins, not on some later timer tick -
+  // this is what the unsynced-work banner counts from (see updateUnsyncedBanner).
+  if(!unsyncedSinceAt) unsyncedSinceAt = lastEditAt;
   // First change in a new burst of activity - the debounce timer isn't already running.
   // Capture what state looked like BEFORE this burst as the undo point.
   if(!saveTimer && lastStableSnapshot){
@@ -938,6 +952,8 @@ function syncToCloud(){
       return res.json().then(function(saved){
         state.lastEditedAt = saved.lastEditedAt;
         lastStableSnapshot = JSON.stringify(state); // keep the "any unsaved edits?" signal accurate
+        lastSuccessfulSyncAt = Date.now();
+        unsyncedSinceAt = null; // this is what actually clears the unsynced-work banner
         setCloudIndicator('Synced');
         return persistSet(SAVE_KEY, JSON.stringify(state));
       });
@@ -1001,7 +1017,10 @@ function handleSaveConflict(conflict){
   ]);
 }
 
-function hasUnsyncedChanges(){
+// Whether state has been flushed to LOCAL storage yet (mid-debounce vs. settled) - used only to
+// decide if it's safe to silently overwrite in-memory state with a freshly-fetched cloud version
+// without losing a keystroke that hasn't been saved anywhere yet. NOT a cloud-sync signal.
+function hasUnflushedEdits(){
   return JSON.stringify(state) !== lastStableSnapshot;
 }
 
@@ -1020,7 +1039,7 @@ function checkForNewerVersion(){
     return res.ok ? res.json() : null;
   }).then(function(rec){
     if(!rec || !rec.lastEditedAt || rec.lastEditedAt === state.lastEditedAt) return;
-    if(!hasUnsyncedChanges()){
+    if(!hasUnflushedEdits()){
       loadCloudPlanIntoState(rec);
       toast('Updated to the latest version' + (rec.lastEditedBy ? ' (' + rec.lastEditedBy + ')' : ''));
     } else {
@@ -1031,20 +1050,16 @@ function checkForNewerVersion(){
 }
 
 // Persistent, hard-to-miss warning (not just the small cloudIndicator text) for when a device
-// has been sitting on unsynced local edits for a while - the real risk this guards against is
-// two people offline on the same plan for 30-40+ min each, diverging without either knowing.
-// Doesn't try to fix that (no auto-merge - see earlier discussion), just makes the accumulating
-// risk visible in real time so people notice and can coordinate before it becomes a conflict.
+// has been sitting on edits that haven't reached the CLOUD in a while - driven by lastEditAt /
+// lastSuccessfulSyncAt (set in scheduleSave/syncToCloud/loadCloudPlanIntoState above), not by
+// local-storage flush state, which settles within 500ms regardless of connectivity and would
+// never trigger this. The real risk this guards against is two people offline on the same plan
+// for 30-40+ min each, diverging without either knowing. Doesn't try to fix that (no auto-merge -
+// see earlier discussion), just makes the accumulating risk visible in real time.
 var UNSYNCED_WARNING_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
-var unsyncedSinceAt = null; // when the current streak of unsynced edits began, or null if caught up
 var unsyncedBannerTimer = null;
 
 function updateUnsyncedBanner(){
-  if(hasUnsyncedChanges()){
-    if(!unsyncedSinceAt) unsyncedSinceAt = Date.now();
-  } else {
-    unsyncedSinceAt = null;
-  }
   var banner = document.getElementById('unsyncedBanner');
   if(!banner) return;
   var staleMs = unsyncedSinceAt ? (Date.now() - unsyncedSinceAt) : 0;
@@ -1107,6 +1122,11 @@ function loadCloudPlanIntoState(rec){
   undoStack = [];
   updateUndoButton();
   lastStableSnapshot = JSON.stringify(state);
+  // Just loaded straight from the cloud, so this device is caught up as of right now regardless
+  // of whether the doSave() below's own round-trip succeeds - clears the unsynced-work banner.
+  lastEditAt = null;
+  lastSuccessfulSyncAt = Date.now();
+  unsyncedSinceAt = null;
   doSave();
 }
 
@@ -3858,6 +3878,11 @@ function wireUp(){
     state.planId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('p'+Date.now()+Math.random().toString(36).slice(2));
     state.status = 'Draft';
     state.lastEditedAt = null;
+    // Don't let the OLD plan's unsynced-streak timestamp bleed into this new one - otherwise
+    // the banner could fire based on how long ago the previous plan went stale, not this one.
+    lastEditAt = null;
+    lastSuccessfulSyncAt = null;
+    unsyncedSinceAt = null;
     // columnVisibility and customColumns are intentionally preserved across projects.
     undoStack = [];
     updateUndoButton();
