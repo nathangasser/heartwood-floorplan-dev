@@ -212,6 +212,15 @@
     display:none !important;
   }
 
+  /* Crew view: trimmed UI for anyone opening a shared link (see the Crew Mode block in the
+     script for how this gets applied/remembered). No drawing toolbar or level add/rename -
+     the level dropdown itself stays, so multi-level navigation still works. Title becomes
+     read-only via JS (contentEditable=false), so it no longer takes focus/shows a cursor. */
+  .crew-view #toolbar, .crew-view #renameLevelBtn, .crew-view #addLevelBtn{
+    display:none !important;
+  }
+  .crew-view #title{ cursor:default; }
+
   #photoViewerOverlay{
     position:fixed; inset:0; background:rgba(10,10,10,0.92); z-index:110;
     display:flex; align-items:center; justify-content:center; padding:20px;
@@ -456,7 +465,8 @@ var ui = {
   selectedOpeningId: null,
   selectedLabelId: null,
   selectedInteriorId: null,
-  drawPreview: null
+  drawPreview: null,
+  viewMode: 'full' // 'full' | 'crew' - see resolveInitialViewMode()/setViewMode() below
 };
 var pendingPhotoOpeningId = null;
 var justPlacedLabelId = null;
@@ -1145,6 +1155,38 @@ function openPlanById(planId){
   }).catch(function(){ toast('Could not open that plan'); });
 }
 
+/* ---- Crew Mode / view mode -------------------------------------------------------------
+   Crew view is a trimmed-down UI (no drawing toolbar, no level rename/add, no plan-management
+   File/Options items, read-only title) meant to be the default for anyone opening a shared
+   link - full view is one menu tap away ("Switch to Full View"). This is a UI display mode, not
+   a real permission boundary - crew can still move/resize existing openings and drag walls in
+   the default Move mode, and switching to full view gives complete access, same as before.
+   Precedence: an explicit ?view= param (from a share link) always wins and updates the
+   per-device remembered preference; with no param, the remembered preference is used; with
+   neither, it defaults to full view so normal (non-shared-link) app usage is unaffected. */
+var VIEW_PREF_KEY = 'floorplan-view-pref';
+function resolveInitialViewMode(){
+  var params = new URLSearchParams(location.search);
+  var fromUrl = params.get('view');
+  if(fromUrl==='crew' || fromUrl==='full'){
+    try{ localStorage.setItem(VIEW_PREF_KEY, fromUrl); }catch(e){}
+    return fromUrl;
+  }
+  var stored = null;
+  try{ stored = localStorage.getItem(VIEW_PREF_KEY); }catch(e){}
+  return (stored==='crew' || stored==='full') ? stored : 'full';
+}
+function applyViewMode(){
+  document.body.classList.toggle('crew-view', ui.viewMode==='crew');
+  var titleEl = document.getElementById('title');
+  if(titleEl) titleEl.contentEditable = ui.viewMode==='crew' ? 'false' : 'true';
+}
+function setViewMode(mode){
+  ui.viewMode = mode;
+  try{ localStorage.setItem(VIEW_PREF_KEY, mode); }catch(e){}
+  applyViewMode();
+}
+
 var pendingSharedPlanId = null;
 
 // Reads ?plan=<id> off the URL (how a shared link opens a specific plan) and cleans it from
@@ -1165,9 +1207,11 @@ function checkUrlForSharedPlan(){
 
 // Puts a link to the current plan on the clipboard (or the OS share sheet on mobile) so it
 // can be dropped into Slack, Airtable, wherever - opening it loads this exact plan directly.
+// Share links default to crew view - see the Crew Mode block above. Full-view users don't
+// generally need a link at all (they already have direct access to the app).
 function shareCloudLink(){
   if(!state.planId){ toast('Nothing to share yet'); return; }
-  var url = location.origin + location.pathname + '?plan=' + encodeURIComponent(state.planId);
+  var url = location.origin + location.pathname + '?plan=' + encodeURIComponent(state.planId) + '&view=crew';
   if(navigator.share){
     navigator.share({ title: state.title || 'Floor Plan', url: url })
       .catch(function(err){ if(err && err.name==='AbortError') return; copyLinkFallback(url); });
@@ -3926,14 +3970,27 @@ function wireUp(){
   });
 
   document.getElementById('optionsMenuBtn').addEventListener('click', function(){
-    showMenuDialog('Options', [
-      { label: 'Status: ' + (state.status||'Draft') + '\u2026', onClick: editStatus },
-      { label: 'Renumber "'+currentLevel().name+'" clockwise', onClick: renumberClockwise },
-      { label: 'Manage schedule columns', onClick: showColumnsDialog },
-      { label: 'Lock "'+currentLevel().name+'"\u2026', onClick: showLockDialog },
-      { label: 'Reset "'+currentLevel().name+'"', onClick: resetCurrentLevel, danger: true },
-      { label: 'Delete "'+currentLevel().name+'"', onClick: deleteCurrentLevel, danger: true }
-    ]);
+    var items;
+    if(ui.viewMode==='crew'){
+      // Trimmed for crew: status/renumber/locks/reset/delete are shop-management concerns,
+      // not part of a day-to-day "mark complete, add notes/photos" workflow. Column visibility
+      // stays since it's non-destructive and directly useful for whatever they're working.
+      items = [
+        { label: 'Manage schedule columns', onClick: showColumnsDialog },
+        { label: 'Switch to Full View', onClick: function(){ setViewMode('full'); toast('Full view'); } }
+      ];
+    } else {
+      items = [
+        { label: 'Status: ' + (state.status||'Draft') + '\u2026', onClick: editStatus },
+        { label: 'Renumber "'+currentLevel().name+'" clockwise', onClick: renumberClockwise },
+        { label: 'Manage schedule columns', onClick: showColumnsDialog },
+        { label: 'Lock "'+currentLevel().name+'"\u2026', onClick: showLockDialog },
+        { label: 'Reset "'+currentLevel().name+'"', onClick: resetCurrentLevel, danger: true },
+        { label: 'Delete "'+currentLevel().name+'"', onClick: deleteCurrentLevel, danger: true },
+        { label: 'Switch to Crew View', onClick: function(){ setViewMode('crew'); toast('Crew view'); } }
+      ];
+    }
+    showMenuDialog('Options', items);
   });
   // This button is only ever visible when signed in (see updateUserMenuButton) - the
   // signed-out state is Google's own rendered button in #googleSignInSlot instead.
@@ -4040,19 +4097,29 @@ function wireUp(){
   window.doStartNew = doStartNew;
 
   document.getElementById('fileMenuBtn').addEventListener('click', function(){
-    showMenuDialog('File', [
-      { label: 'HWR Plans\u2026', onClick: showHwrPlansDialog },
-      { label: 'New\u2026', onClick: startNewPlanFlow },
-      { label: 'Export\u2026', onClick: function(){
-          showMenuDialog('Export', [
-            { label: 'PDF', onClick: exportPdf },
-            { label: 'CSV', onClick: exportCsv }
-          ]);
-        }
-      },
-      { label: 'Share Link', onClick: shareCloudLink },
-      { label: 'Address\u2026', onClick: editAddress }
-    ]);
+    var exportItem = { label: 'Export\u2026', onClick: function(){
+        showMenuDialog('Export', [
+          { label: 'PDF', onClick: exportPdf },
+          { label: 'CSV', onClick: exportCsv }
+        ]);
+      }
+    };
+    var shareItem = { label: 'Share Link', onClick: shareCloudLink };
+    var items;
+    if(ui.viewMode==='crew'){
+      // Browsing every job (HWR Plans), starting a new one, and editing the address are all
+      // shop-management actions, not part of working the one job this link points to.
+      items = [ exportItem, shareItem ];
+    } else {
+      items = [
+        { label: 'HWR Plans\u2026', onClick: showHwrPlansDialog },
+        { label: 'New\u2026', onClick: startNewPlanFlow },
+        exportItem,
+        shareItem,
+        { label: 'Address\u2026', onClick: editAddress }
+      ];
+    }
+    showMenuDialog('File', items);
   });
   document.getElementById('photoInput').addEventListener('change', function(ev){
     var f = ev.target.files && ev.target.files[0];
@@ -4078,6 +4145,11 @@ function wireUp(){
 function init(){
   wireUp();
   initGoogleAuth();
+  // Resolve crew/full view before anything renders, so there's no flash of the full UI on a
+  // crew link. Reads the same URL (?view=) that checkUrlForSharedPlan reads right after -
+  // both run before that call's history.replaceState strips the query string.
+  ui.viewMode = resolveInitialViewMode();
+  applyViewMode();
   // Read synchronously, before any async GIS sign-in callback can fire, so a shared link's
   // ?plan= id is captured in time even if the visitor isn't signed in yet.
   checkUrlForSharedPlan();

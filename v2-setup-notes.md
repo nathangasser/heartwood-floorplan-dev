@@ -228,6 +228,86 @@ confirm you can immediately drag it again without it deselecting or grabbing a h
 confirm the zoom-in on select feels smooth rather than jumpy; confirm dragging a window far along
 a long wall slowly pans the view to follow instead of losing it off-screen.
 
+## Round 7 - EXPERIMENTAL layout reorder (2026-08-01) - TRIED, ROLLED BACK
+Nathan's verdict: still a large shift during focus mode, not worth the UI chaos of moving
+tabs/title/level below the canvas. Reverted index.html back to the pre-experiment version
+(confirmed byte-identical to index-backup-before-layout-reorder-2026-08-01.html). Header/tabs
+are back above the canvas in their original order (shareBar, banner, header, tabs, views), and
+shareBar + the unsynced banner hide in focus mode again as before.
+Round 6's fixes (highlight-strip deselect bug, relocated/shrunk resize handles, focus-mode zoom
+anchor, slow edge auto-pan) are untouched by this rollback and remain in place - those were a
+separate, independent set of changes from the layout reorder and are still considered good.
+Backup file kept around in case it's ever useful for reference, otherwise no longer needed.
+
+## Round 7 (original entry, superseded by rollback above) - BUILT, not yet tested
+Nathan's idea to further reduce the focus-mode shift: keep File/Options/User fixed at the very
+top, put the canvas directly beneath it, then toolbar (already there), then Plan/Schedule tabs,
+then the title/level/status/undo/rename/add-level block at the bottom.
+
+Backup of the previous layout: index-backup-before-layout-reorder-2026-08-01.html (full copy of
+index.html as it stood right before this change - if the new order doesn't work out, copy that
+back over index.html to revert instantly, no need to hand-unpick anything).
+
+What changed:
+- Turned out toolbar was already directly under the canvas inside the Plan view - so this was a
+  reorder of 3 top-level blocks (views, tabs, header), not a restructuring. New body order:
+  shareBar, unsyncedBanner, views (canvas+toolbar or schedule table, whichever tab is active),
+  tabs, header.
+- shareBar and the unsynced-work banner no longer hide in focus mode (they used to, along with
+  header/tabs/toolbar). Now that shareBar is the fixed anchor the canvas sits under, hiding it
+  would defeat the point; the banner staying visible matches its "hard to miss" purpose even
+  during a longer focus session.
+- Header's divider line moved from border-bottom to border-top (it's now the last block, not the
+  first) and its bottom row (level select / Rename / + Level) picks up
+  env(safe-area-inset-bottom) padding, since it's now the true bottom edge of the screen on
+  notched/gesture-nav phones - matches the same pattern already used for the inline panel and
+  shareBar's top padding. Tabs picked up a matching border-top so there's still a visible divider
+  between the canvas/schedule content and the tabs now below it.
+- Toolbar and tab visual styling deliberately left untouched, so this test isolates just the
+  ordering effect - worth a follow-up round of visual polish once Nathan has a feel for whether
+  the order itself works.
+No AWS changes needed - frontend only. Re-push index.html to beta and test on an actual phone
+(this one really needs real-device testing, not just desktop resize) - specifically: does
+selecting a window feel calmer now, do tabs/title/level controls feel reachable/sensible near the
+bottom, does anything feel cut off near the screen edges.
+
+## Round 8 - Crew Mode - BUILT, not yet tested
+The full design from earlier discussion, now implemented. A UI display mode, not a real
+permission boundary - matches the "roles are UI display modes" principle agreed early on.
+
+How it's chosen: an explicit `?view=crew` or `?view=full` on the URL always wins and updates a
+per-device remembered preference (localStorage key `floorplan-view-pref`); with no param, the
+remembered preference is used; with neither a param nor a stored preference, it defaults to full
+view - so normal day-to-day app use (bookmarked, no share link) is unaffected. Share Link now
+always generates a crew-view link (`?plan=<id>&view=crew`) - no separate "share as full view"
+option built, since a fellow manager would just open the app directly rather than via a link.
+
+What's trimmed in crew view:
+- No drawing toolbar. Since there's then no way to switch out of the existing "Move" tool, crew
+  can still drag/reposition/resize existing windows and doors and drag walls (that capability
+  was already built in, nothing new here) - they just can't add brand-new structural elements
+  without switching to full view. This gives the "fallback, make changes on the fly" ability you
+  wanted without any new permission-checking code.
+- Level bar keeps the level dropdown (multi-story navigation still works) but drops Rename and
+  + Level - those are setup actions.
+- Title becomes read-only (no more tap-to-rename) - the plan is a shared record, renaming isn't
+  part of day-to-day work.
+- File menu keeps only Export and Share Link - drops HWR Plans (browsing every job in the shop),
+  New (starting other plans), and Address… (already visible as a badge on the canvas and on the
+  Schedule tab without a separate edit action).
+- Options menu keeps only Manage schedule columns (useful, non-destructive) and a new
+  "Switch to Full View" item - drops Status, Renumber, Lock Level, Reset Level, Delete Level.
+- Full view's Options menu gains a matching "Switch to Crew View" item at the end, for previewing
+  what crew sees without needing an actual share link.
+- Lands on the Plan tab by default - this needed no new code, since a fresh page load has always
+  started on the Plan tab regardless of view mode (ui.tab isn't persisted).
+
+No AWS changes needed - frontend only. Re-push index.html to beta and test: generate a Share
+Link, open it in a private window/second device, confirm it opens trimmed and lands on Plan;
+confirm "Switch to Full View" restores everything and is remembered on that device even after
+closing and reopening the tab; confirm your own normal (non-shared-link) usage still opens full
+view as always.
+
 ## "Window / Door Schedule" renamed to "Window Schedule" - BUILT
 Renamed everywhere it appeared: the tab label and both PDF export page headers. No AWS changes -
 frontend only, re-push to beta and retest along with the banner fix.
@@ -287,9 +367,7 @@ Claude's proposed approach (discussed, not yet built or agreed):
   manually switched to (via localStorage), or always reset to crew mode when reopening a crew
   link fresh? Leaning toward remembering per-device so a crew member who regularly needs full
   access isn't fighting the UI every time - but this is Nathan's call, not decided yet.
-- Backlog, roughly in priority order: Crew Mode (full design agreed - default-crew share links,
-  per-device remembered preference via localStorage, lands on Plan tab, no drawing toolbar,
-  trimmed header, "Switch to Full View" in a menu, "Switch to Crew View" added to Options for
-  previewing - not yet built), per-opening color tag/flag/comment, Make.com/Airtable
-  auto-archive webhook (needs airtableRecordId field + a machine-auth endpoint), then promote
-  beta to production once everything's solid.
+- Backlog, roughly in priority order: Crew Mode (BUILT in Round 8 above, needs real-device
+  testing), per-opening color tag/flag/comment, Make.com/Airtable auto-archive webhook (needs
+  airtableRecordId field + a machine-auth endpoint), then promote beta to production once
+  everything's solid.
