@@ -173,7 +173,8 @@
     background:var(--panel); border-bottom:2px solid var(--ink);
   }
   #shareBar button{flex:1; background:var(--ink); color:#fff; border:none; border-radius:10px; padding:11px 4px; font-size:12.5px; font-weight:800;}
-  #userMenuBtn{display:flex; align-items:center; justify-content:center;}
+  #userMenuArea{flex:1; display:flex; align-items:center; justify-content:center;}
+  #userMenuBtn{display:flex; align-items:center; justify-content:center; width:100%;}
   #shareBar button.secondary{background:var(--paper); color:var(--ink); border:2px solid var(--ink);}
 
   #dialogOverlay{
@@ -249,7 +250,10 @@
   <div id="shareBar">
     <button id="fileMenuBtn">File &#9662;</button>
     <button id="optionsMenuBtn">Options &#9662;</button>
-    <button id="userMenuBtn">Sign In</button>
+    <div id="userMenuArea">
+      <div id="googleSignInSlot"></div>
+      <button id="userMenuBtn" style="display:none;"></button>
+    </div>
   </div>
 
   <header>
@@ -1076,13 +1080,19 @@ var USER_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 
 function updateUserMenuButton(){
   var btn = document.getElementById('userMenuBtn');
+  var slot = document.getElementById('googleSignInSlot');
   if(!btn) return;
   if(isSignedIn()){
     btn.innerHTML = USER_ICON_SVG;
     btn.title = 'Signed in as ' + currentUserEmail;
+    btn.style.display = '';
+    if(slot) slot.style.display = 'none';
   } else {
-    btn.textContent = 'Sign In';
-    btn.title = '';
+    // Signed-out state is Google's own rendered button (see initGoogleAuth), not this one -
+    // it's the only sign-in trigger that reliably works even after someone has dismissed the
+    // One Tap prompt once (see note on initGoogleAuth for why).
+    btn.style.display = 'none';
+    if(slot) slot.style.display = '';
   }
 }
 
@@ -1110,9 +1120,12 @@ function signOutUser(){
   toast('Signed out');
 }
 
-// No inline rendered Google button (its fixed appearance and full-width email display were
-// crowding the header) - a small "Sign In" button calls prompt() directly instead. This is
-// Google's own documented pattern for custom-styled sign-in triggers.
+// Renders Google's own small icon-only button into #googleSignInSlot for the signed-out state,
+// rather than a custom button calling prompt() on click. This matters: once someone dismisses
+// or misses the One Tap prompt, Google suppresses it from auto-showing again for a while, and
+// prompt() calls after that go silently nowhere - which is exactly the bug where the old custom
+// "Sign In" button stopped working after being missed once. A real rendered Google button is a
+// direct user gesture, not an auto-prompt, and isn't subject to that suppression - it always works.
 function initGoogleAuth(){
   if(!window.google || !google.accounts || !google.accounts.id){
     setTimeout(initGoogleAuth, 300); // gsi/client script may still be loading
@@ -1123,21 +1136,25 @@ function initGoogleAuth(){
     callback: handleGoogleCredential,
     auto_select: true
   });
+  var slot = document.getElementById('googleSignInSlot');
+  if(slot){
+    google.accounts.id.renderButton(slot, { type:'icon', theme:'outline', size:'medium', shape:'circle' });
+  }
   updateUserMenuButton();
-  google.accounts.id.prompt(); // silent re-sign-in via One Tap if there's an eligible session
+  google.accounts.id.prompt(); // opportunistic silent re-sign-in for a returning session - fine
+                                // if this gets suppressed, since the rendered button above always works
 }
 
 // Any action that needs cloud access (HWR Plans, etc.) routes through here instead of a toast
-// that's easy to miss - a real dialog with a direct "Sign In" action.
+// that's easy to miss. Points at the real sign-in button (top right) rather than trying to
+// trigger sign-in itself - a dialog button can't reliably drive Google's rendered widget, and
+// prompt() alone is the exact mechanism that silently stops working after being dismissed once.
 function requireSignInDialog(message){
   showConfirmDialog({
     title: 'Sign in required',
-    message: message || 'Sign in with your heartwoodrestore.com account to continue.',
-    okLabel: 'Sign In',
-    onConfirm: function(){
-      if(window.google && google.accounts && google.accounts.id) google.accounts.id.prompt();
-      else toast('Sign-in is still loading — try again in a moment');
-    }
+    message: (message || 'Sign in to continue.') + ' Tap the sign-in icon at the top right.',
+    okLabel: 'Got it',
+    cancelLabel: 'Close'
   });
 }
 function updateUndoButton(){
@@ -3648,16 +3665,12 @@ function wireUp(){
       { label: 'Delete "'+currentLevel().name+'"', onClick: deleteCurrentLevel, danger: true }
     ]);
   });
+  // This button is only ever visible when signed in (see updateUserMenuButton) - the
+  // signed-out state is Google's own rendered button in #googleSignInSlot instead.
   document.getElementById('userMenuBtn').addEventListener('click', function(){
-    if(isSignedIn()){
-      showMenuDialog('Signed in as ' + currentUserEmail, [
-        { label: 'Sign out', onClick: signOutUser, danger: true }
-      ]);
-    } else if(window.google && google.accounts && google.accounts.id){
-      google.accounts.id.prompt();
-    } else {
-      toast('Sign-in is still loading — try again in a moment');
-    }
+    showMenuDialog('Signed in as ' + currentUserEmail, [
+      { label: 'Sign out', onClick: signOutUser, danger: true }
+    ]);
   });
 
   document.getElementById('undoBtn').addEventListener('click', undo);
