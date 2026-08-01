@@ -441,6 +441,109 @@ would train people to ignore it right when it matters most. Decision: leave at 1
 revisit later based on real field data once crew is actually using it, rather than guess further
 from a desk. No code change made.
 
+## Round 9d - two-phone testing found real bugs in the structural gate - FIXED, deploy needed
+Nathan tested Round 9c on two real phones (same account, opposite walls, adding then editing
+openings). Two real bugs found, both in `index.mjs`, not the merge logic itself:
+
+1. **Frontend leak**: `buildCloudPayload()` cloned the entire `state` object into `data`,
+   including `state.lastEditedAt` and `state.structuralLastEditedAt` themselves - both change on
+   every save from either device, so they were embedded in the exact blob the Lambda diffs to
+   decide "did anything structural change." Any save from one device made the *other* device's
+   next save look structurally different, regardless of what was actually touched. Fixed: both
+   fields are now deleted from the clone before it's sent - they're tracked and restored
+   separately at the top level already (confirmed against `loadCloudPlanIntoState`, which sets
+   them from `rec.lastEditedAt`/`rec.structuralLastEditedAt` directly, never from `data`).
+
+2. **Lambda architecture bug** (the bigger one): the structural gate did `return json(409, ...)`
+   *before* the per-opening/per-label merge ever ran. So any structural baseline mismatch -
+   real or false-positive - blocked opening/label merges too, contradicting the "two independent
+   mechanisms" design. This is what made "Keep mine"/"Discard mine" look like it was arbitrarily
+   picking winners: opening edits were queuing up unsynced behind unrelated wall disagreements,
+   and a forced resync just happened to push through whatever full snapshot was on that phone at
+   that moment. Also, the gate fired on baseline mismatch alone, without checking whether the
+   structural content actually differed.
+
+   Fixed by refactoring `savePlan` into a pure `computeSave(planId, prev, body, userEmail, now)`
+   (no I/O, unit-testable) plus a thin I/O wrapper. The per-opening/label merge now always runs,
+   independent of the structural check. A structural conflict now requires BOTH a stale baseline
+   AND actually-different content. When a genuine structural conflict exists, only the structural
+   half of the write is withheld (`data` and `structuralLastEditedAt` keep the previously stored
+   values) - the opening/label merge is written either way, so nobody's window/door edits wait on
+   an unrelated wall disagreement. The 409 response's `current` field now includes the
+   already-merged openings/labels, so even "Discard mine" doesn't throw away opening edits that
+   had nothing to do with the structural conflict.
+
+   `computeSave`/`mergeKeyedMap`/`openingContentEqual` are now exported (harmless for the Lambda
+   runtime - `handler` is still the only entry point AWS calls) so they can be tested directly.
+
+**Verified with a scripted test harness** (`test-conflict-scenarios.mjs`, left in the outputs
+folder - run with `node test-conflict-scenarios.mjs` after `npm install` for the AWS SDK
+packages, or stub them out for a network-free run). 20 assertions across 6 scenarios, all passing:
+different-openings silent merge, the exact bug Nathan hit (opening edit + concurrent real wall
+edit - opening edit no longer lost, structural conflict still correctly flagged), stale-baseline-
+but-identical-content (no false conflict), true same-opening conflict (still correctly flagged,
+first-applied value kept), old-schema backward compatibility, and deletion-tombstone
+resurrection-blocking. `node --check` clean on both files.
+
+**Scope decision (Nathan's call, agreed)**: don't build the full one-at-a-time same-opening
+conflict dialog (Round 9d's original scope per the design doc) right now. Existence races
+(add/delete during someone else's edit) are already safe via tombstones - worst case is
+last-write-wins, never corruption or resurrection. True same-field-same-opening collisions will
+be rare in real crew use; the existing interim behavior (silently keep whichever saved first,
+toast the loser) is an acceptable stopgap for that rare case. Effort instead went into fixing the
+above two bugs, since making the common case - different crew members, different openings, no
+interruption - actually reliable matters more than polishing the rare-conflict UX right now.
+
+**Needs deploy + retest**: `index.mjs` needs to be redeployed (frontend `index.html` fix from
+earlier this session too, if not already pushed). Retest recipe: same two-phone setup, edit
+different openings' details (not add/delete) on opposite sides - should now merge with no dialog
+at all. Then, to specifically confirm the fix, have one phone make a real wall edit while the
+other edits an unrelated opening at the same time - the wall-editing phone's disagreement should
+show the structural dialog as before, but the *other* phone's opening edit should go through
+cleanly without ever seeing it.
+
+## Round 9e - two more bugs from live retest (deployed Round 9d Lambda) - FIXED, deploy needed
+Nathan retested on two phones with the fixed Lambda actually confirmed deployed (pasted the exact
+file back to verify). Both phones got the structural conflict dialog immediately on sign-in
+before either made an edit, and a genuine field edit (a note changed from "Hi" to "Hi there")
+silently reverted back to "Hi" on both phones about 5 minutes later, after the periodic refresh.
+
+1. **JSON.stringify is key-order-sensitive, and key order isn't stable here.** `structuralChanged`
+   compared `body.data` against `prev.data` with `JSON.stringify(...) !== JSON.stringify(...)`.
+   But `loadCloudPlanIntoState()` ends by calling `doSave()`, which immediately re-syncs to the
+   cloud right after every load - and the client rebuilds that data via migration
+   functions/Object.assign on the way in, which does not preserve the original key order. So a
+   plan that hasn't structurally changed at all could still stringify differently than what's
+   stored, purely from key order - producing a fresh structural conflict on essentially every
+   load. This is almost certainly why the dialog appeared immediately, on both phones, before
+   either had done anything. Fixed with a proper order-independent `deepEqual()`, used for both
+   `structuralChanged` and `openingContentEqual`'s per-field comparison (same risk applies to any
+   opening field that's itself an object, e.g. `cells`).
+
+2. **The periodic "newer version" check was using the wrong signal to decide if it's safe to
+   silently overwrite local state.** `hasUnflushedEdits()` compared against `lastStableSnapshot`,
+   which settles to match current state within 500ms of any edit - regardless of whether the
+   cloud sync that follows actually succeeds. So the moment Phone 2's note edit hit a conflict and
+   got abandoned (dismissed via the dialog's Cancel/backdrop), the app had already privately
+   marked it "safe," even while the cloud indicator correctly showed "Conflict." Five minutes
+   later, `checkForNewerVersion()` saw nothing at risk and silently pulled the server's copy over
+   it. Fixed: `hasUnflushedEdits()` now checks `unsyncedSinceAt !== null` instead - the same signal
+   that already correctly drives the 10-minute unsynced-work banner, cleared only on a genuine 200
+   from `syncToCloud()`. A stuck/abandoned edit is now protected from being silently discarded and
+   will surface via the existing banner instead.
+
+Didn't make the structural conflict dialog non-dismissable - with fix #2 in place, dismissing it
+is no longer lossy (the edit stays protected locally until it's actually resolved), so forcing an
+explicit choice isn't necessary right now.
+
+**Verified**: extended `test-conflict-scenarios.mjs` to 29 assertions (added a same-content-
+different-key-order scenario proving no false structural conflict, plus direct `deepEqual` sanity
+checks) - all passing. Both files syntax-clean.
+
+**Needs deploy + retest**: `index.mjs` redeploy + `index.html` push. Retest recipe: open the plan
+fresh on both phones - should NOT see the dialog immediately anymore. Then repeat the
+different-opening-edit test from Round 9d's retest recipe.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

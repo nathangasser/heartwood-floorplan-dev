@@ -1139,11 +1139,18 @@ function handleSaveConflict(conflict){
   ]);
 }
 
-// Whether state has been flushed to LOCAL storage yet (mid-debounce vs. settled) - used only to
-// decide if it's safe to silently overwrite in-memory state with a freshly-fetched cloud version
-// without losing a keystroke that hasn't been saved anywhere yet. NOT a cloud-sync signal.
+// Whether there's an edit that hasn't been CONFIRMED synced to the cloud yet - used to decide if
+// it's safe for checkForNewerVersion() to silently overwrite in-memory state with a freshly-
+// fetched cloud version. Previously compared against lastStableSnapshot (local-storage-flush
+// state), which settles within 500ms of any edit regardless of whether the cloud sync that
+// follows actually succeeds - so a save stuck behind a conflict (409, or a network failure) still
+// looked "flushed" and got silently overwritten by the next periodic check 5 minutes later, even
+// while the cloud indicator was correctly showing "Conflict". unsyncedSinceAt is the right signal
+// here - it's already precisely "there's an edit not yet confirmed synced" (set the moment an
+// edit starts, cleared only on a genuine 200 from syncToCloud - see scheduleSave/syncToCloud
+// above), which is exactly what the unsynced-work banner already relies on.
 function hasUnflushedEdits(){
-  return JSON.stringify(state) !== lastStableSnapshot;
+  return unsyncedSinceAt !== null;
 }
 
 // Periodically checks whether someone else has saved a newer version of the plan you have
