@@ -947,6 +947,13 @@ function apiFetch(path, opts){
 // the array right now.
 function buildCloudPayload(){
   var clone = JSON.parse(JSON.stringify(state));
+  // These two are pure sync bookkeeping, not plan content - they change on every save from
+  // either device and must not be part of the structural-change diff on the server, or every
+  // save would look "structurally different" from whatever the other device last wrote.
+  // They're tracked and restored separately at the top level (item.lastEditedAt /
+  // item.structuralLastEditedAt), never read back out of data.
+  delete clone.lastEditedAt;
+  delete clone.structuralLastEditedAt;
   var openingsByLevel = {}, labelsByLevel = {};
 
   clone.levels.forEach(function(lvl){
