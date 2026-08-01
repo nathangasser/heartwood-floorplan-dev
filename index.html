@@ -883,14 +883,31 @@ function apiFetch(path, opts){
   return fetch(API_BASE + path, opts);
 }
 
-// Clone of state safe to send to the cloud. Photos stay device-local for now (base64 images
-// would blow past DynamoDB's 400KB item limit fast) - photo cloud sync via S3 is a fast-follow.
+// Clone of state safe to send to the cloud. The base64 photo previews (o.photos) are stripped -
+// those would blow past DynamoDB's 400KB item limit fast - but o.photoKeys (the small S3 key
+// references, uploaded separately via uploadPhotoToCloud) pass through untouched. That's how a
+// photo actually travels between devices: the key syncs in the data blob, the pixels live in S3.
 function stateForCloud(){
   var clone = JSON.parse(JSON.stringify(state));
   clone.levels.forEach(function(lvl){
     (lvl.openings||[]).forEach(function(o){ delete o.photos; });
   });
   return clone;
+}
+
+// Flat list of every S3 key referenced anywhere in the plan - sent alongside `data` so the
+// server knows which keys to generate fresh view URLs for on the next load (see getPlan in
+// the Lambda, which already does this for whatever's in this list - no backend change needed).
+function collectPhotoKeys(){
+  var keys = [];
+  state.levels.forEach(function(lvl){
+    (lvl.openings||[]).forEach(function(o){
+      if(!o.photoKeys) return;
+      if(o.photoKeys.interior) keys.push(o.photoKeys.interior);
+      if(o.photoKeys.exterior) keys.push(o.photoKeys.exterior);
+    });
+  });
+  return keys;
 }
 
 function syncToCloud(){
@@ -901,6 +918,7 @@ function syncToCloud(){
     address: state.address,
     status: state.status || 'Draft',
     data: stateForCloud(),
+    photos: collectPhotoKeys(),
     expectedLastEditedAt: state.lastEditedAt
   };
   setCloudIndicator('Syncing…');
@@ -921,6 +939,41 @@ function syncToCloud(){
       console.error('Cloud sync failed', err);
       setCloudIndicator('Not synced');
     });
+}
+
+function dataUrlToBlob(dataUrl){
+  return fetch(dataUrl).then(function(r){ return r.blob(); });
+}
+
+// Uploads a captured photo to S3 via a presigned URL, then records the S3 key on the opening
+// so the next autosave includes it. The local base64 preview (o.photos[slot]) is already showing
+// instantly by the time this runs - this is purely what makes the photo travel to other devices.
+// Skips silently if not signed in: the photo still works fine on this device either way, it just
+// won't sync until the next successful capture while signed in.
+function uploadPhotoToCloud(openingId, slot, dataUrl){
+  if(!isSignedIn()) return;
+  apiFetch('/photos/upload-url', {
+    method: 'POST',
+    body: JSON.stringify({ planId: state.planId, openingId: openingId, kind: slot })
+  }).then(function(res){
+    if(!res.ok) throw new Error('could not get upload URL');
+    return res.json();
+  }).then(function(data){
+    return dataUrlToBlob(dataUrl).then(function(blob){
+      return fetch(data.uploadUrl, { method:'PUT', headers:{'Content-Type':'image/jpeg'}, body: blob });
+    }).then(function(putRes){
+      if(!putRes.ok) throw new Error('S3 upload failed');
+      var lvl = currentLevel();
+      var o = lvl.openings.find(function(x){ return x.id===openingId; });
+      if(!o) return; // opening was deleted while the upload was in flight - nothing to record
+      if(!o.photoKeys) o.photoKeys = {interior:null, exterior:null};
+      o.photoKeys[slot] = data.key;
+      scheduleSave();
+    });
+  }).catch(function(err){
+    console.error('Photo cloud upload failed', err);
+    toast('Photo saved on this device, but the cloud upload failed');
+  });
 }
 
 // Someone else saved this plan since we last loaded it. Ask which version to keep rather
@@ -975,9 +1028,26 @@ function startPeriodicRefreshCheck(){
   });
 }
 
+// After applyLoadedState() restores levels/openings (including their photoKeys), swap in the
+// fresh presigned view URLs the server just generated (rec.photoUrls, keyed by S3 key) so
+// photos captured on OTHER devices actually display here.
+function resolvePhotoUrls(rec){
+  if(!rec.photoUrls) return;
+  state.levels.forEach(function(lvl){
+    (lvl.openings||[]).forEach(function(o){
+      if(!o.photoKeys) return;
+      ['interior','exterior'].forEach(function(slot){
+        var key = o.photoKeys[slot];
+        if(key && rec.photoUrls[key]) o.photos[slot] = rec.photoUrls[key];
+      });
+    });
+  });
+}
+
 // Pulls a full plan record (as returned by GET/PUT /plans/{id}) into working state.
 function loadCloudPlanIntoState(rec){
   applyLoadedState(rec.data || {});
+  resolvePhotoUrls(rec);
   state.planId = rec.planId;
   state.title = rec.jobName || state.title;
   state.address = rec.address || state.address;
@@ -1201,6 +1271,7 @@ function loadState(cb){
 }
 function migrateOpeningToV3(o){
   if(!o.photos) o.photos = {interior:null, exterior:null};
+  if(!o.photoKeys) o.photoKeys = {interior:null, exterior:null};
   if(o.operation !== undefined) return o; // already current format
   if(o.type==='window'){
     var map = {fixed:'Fixed', doubleHung:'Double Hung', casement:'Casement'};
@@ -1895,6 +1966,7 @@ function convertToFrenchPair(o){
     hingeSide: o.type==='door' ? 'p1' : undefined,
     swingOut: o.type==='door' ? false : undefined,
     photos: Object.assign({interior:null, exterior:null}, o.photos),
+    photoKeys: Object.assign({interior:null, exterior:null}, o.photoKeys),
     cells: Object.assign({}, baseCells, {label: shortPrefix+o.num+'A', operation:'French Pair', swing: o.type==='door' ? 'Inswing, Left' : ''})
   });
   var passive = Object.assign({}, o, {
@@ -1904,6 +1976,7 @@ function convertToFrenchPair(o){
     hingeSide: o.type==='door' ? 'p2' : undefined,
     swingOut: o.type==='door' ? false : undefined,
     photos: Object.assign({interior:null, exterior:null}, o.photos),
+    photoKeys: Object.assign({interior:null, exterior:null}, o.photoKeys),
     cells: Object.assign({}, baseCells, {label: shortPrefix+o.num+'P', operation:'French Pair', swing: o.type==='door' ? 'Inswing, Right' : ''})
   });
 
@@ -1947,6 +2020,7 @@ function addOpening(type, wallKey, along, wallLen){
     swingOut: type==='door' ? false : undefined,
     noWork: false,
     photos: {interior:null, exterior:null},
+    photoKeys: {interior:null, exterior:null},
     cells: {
       label: shortLabel, type: typeName, operation: operation,
       swing: type==='door' ? 'Inswing, Left' : '',
@@ -2200,6 +2274,7 @@ function updateInlinePanel(){
       clearBtn.disabled = !!o.noWork;
       clearBtn.addEventListener('click', function(){
         o.photos[slot] = null;
+        if(o.photoKeys) o.photoKeys[slot] = null; // stop syncing/resolving a removed photo
         updateInlinePanel(); buildScheduleIfActive(); scheduleSave();
       });
       wrap.appendChild(clearBtn);
@@ -3786,6 +3861,7 @@ function wireUp(){
       if(!o.photos) o.photos = {interior:null, exterior:null};
       o.photos[slot] = dataUrl;
       updateInlinePanel(); buildScheduleIfActive(); scheduleSave();
+      uploadPhotoToCloud(o.id, slot, dataUrl); // instant local preview above; this makes it travel between devices
     });
   });
 
