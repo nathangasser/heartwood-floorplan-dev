@@ -1502,6 +1502,86 @@ var MIN_ZOOM = 1, MAX_ZOOM = 6;
 function clampZoom(z){ return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z)); }
 function resetView(){ viewState.zoom = 1; viewState.vx = null; viewState.vy = null; }
 
+/* ---- Focus-mode zoom anchor -----------------------------------------------------------
+   Selecting an opening/label/interior item hides the header/tabs/toolbar (focus mode), which
+   changes the canvas container's size and, since the SVG viewBox is fit-and-centered to that
+   container, used to cause the whole plan to visibly reflow at the exact moment of selection.
+   Instead of leaving the full plan visible through that resize, we deliberately zoom in on the
+   selected item (reusing the same viewState the pinch-zoom/+/- buttons already drive) so the
+   transition reads as "zooming in on what you tapped" rather than an unrelated layout jump.
+   The view from before entering focus mode is restored exactly on exit. */
+var FOCUS_ZOOM = 1.3; // conservative - matches one tap of the existing +/- zoom buttons
+var preFocusViewState = null;
+function applyFocusZoom(anchorX, anchorY){
+  var lvl = currentLevel();
+  var bb = boundingBox(lvl.vertices);
+  var pad = 70;
+  var baseVw = (bb.maxX-bb.minX)+pad*2, baseVh = (bb.maxY-bb.minY)+pad*2;
+  var targetZoom = clampZoom(Math.max(viewState.zoom, FOCUS_ZOOM)); // never zoom OUT to get here
+  var vw = baseVw/targetZoom, vh = baseVh/targetZoom;
+  viewState.zoom = targetZoom;
+  viewState.vx = anchorX - vw/2;
+  viewState.vy = anchorY - vh/2;
+}
+function enterFocusZoom(anchorX, anchorY){
+  if(preFocusViewState===null){
+    preFocusViewState = { zoom: viewState.zoom, vx: viewState.vx, vy: viewState.vy };
+  }
+  applyFocusZoom(anchorX, anchorY);
+}
+function exitFocusZoom(){
+  if(preFocusViewState){
+    viewState.zoom = preFocusViewState.zoom;
+    viewState.vx = preFocusViewState.vx;
+    viewState.vy = preFocusViewState.vy;
+    preFocusViewState = null;
+  }
+}
+
+/* ---- Slow edge auto-pan during a drag --------------------------------------------------
+   When zoomed in (focus mode or manual pinch/zoom), dragging a window/door toward the edge
+   of the visible view used to just run out of canvas - nothing followed your finger. While a
+   drag is active and the pointer sits near the edge of #planSvg, this slowly pans the view in
+   that direction so the item stays reachable, then re-runs the drag's own position math
+   against the new (panned) view so the dragged item keeps tracking the pointer smoothly.
+   Deliberately gentle per Nathan's ask - this is a following-nudge, not a fast auto-scroll. */
+var EDGE_PAN_MARGIN = 36;   // px from the canvas edge that triggers panning
+var EDGE_PAN_SPEED = 140;   // viewBox units/second at the current zoom - kept slow on purpose
+var edgePanRAF = null, edgePanLastTime = null, edgePanClient = null, edgePanReposition = null;
+function edgePanTick(now){
+  if(!edgePanClient){ edgePanRAF = null; edgePanLastTime = null; return; }
+  var svg = document.getElementById('planSvg');
+  var rect = svg.getBoundingClientRect();
+  var dt = edgePanLastTime ? Math.min((now-edgePanLastTime)/1000, 0.1) : 0;
+  edgePanLastTime = now;
+  if(rect.width && rect.height && dt > 0){
+    var dxN = 0, dyN = 0;
+    if(edgePanClient.x < rect.left+EDGE_PAN_MARGIN) dxN = -1;
+    else if(edgePanClient.x > rect.right-EDGE_PAN_MARGIN) dxN = 1;
+    if(edgePanClient.y < rect.top+EDGE_PAN_MARGIN) dyN = -1;
+    else if(edgePanClient.y > rect.bottom-EDGE_PAN_MARGIN) dyN = 1;
+    if(dxN || dyN){
+      var vb = computeViewBox(currentLevel(), false);
+      var scaleX = vb.vw/rect.width, scaleY = vb.vh/rect.height;
+      viewState.zoom = clampZoom(viewState.zoom); // ensure it's a real, positioned view
+      viewState.vx = vb.vx + dxN*EDGE_PAN_SPEED*scaleX*dt;
+      viewState.vy = vb.vy + dyN*EDGE_PAN_SPEED*scaleY*dt;
+      if(edgePanReposition) edgePanReposition();
+    }
+  }
+  edgePanRAF = requestAnimationFrame(edgePanTick);
+}
+function startEdgePan(reposition){
+  edgePanReposition = reposition;
+  if(!edgePanRAF){ edgePanLastTime = null; edgePanRAF = requestAnimationFrame(edgePanTick); }
+}
+function updateEdgePanPoint(clientX, clientY){ edgePanClient = {x:clientX, y:clientY}; }
+function stopEdgePan(){
+  edgePanClient = null; edgePanReposition = null;
+  if(edgePanRAF){ cancelAnimationFrame(edgePanRAF); edgePanRAF = null; }
+  edgePanLastTime = null;
+}
+
 function computeViewBox(lvl, printMode){
   var bb = boundingBox(lvl.vertices);
   var pad = 70;
@@ -1706,9 +1786,18 @@ function buildSvg(target, lvl, opts){
 
     if(o.id === ui.selectedOpeningId && !opts.printMode){
       var selG = svgEl('g', {});
-      selG.appendChild(svgEl('line',{x1:p1.x,y1:p1.y,x2:p2.x,y2:p2.y,stroke:'var(--accent)','stroke-width':WALL_T+6,'stroke-linecap':'round',opacity:0.35}));
-      [{p:p1,end:'start'},{p:p2,end:'end'}].forEach(function(h){
-        selG.appendChild(svgEl('circle',{cx:h.p.x, cy:h.p.y, r:11, fill:'var(--accent)', stroke:'#fff','stroke-width':2,'data-role':'handle','data-id':o.id,'data-end':h.end}));
+      // Purely decorative highlight wash - pointer-events:none so a tap here falls through to
+      // the opening's own move-hit-target underneath, instead of hitting this shape (which has
+      // no data-role) and silently deselecting. Moving is by far the most common interaction,
+      // so it should never compete with anything on top of it.
+      selG.appendChild(svgEl('line',{x1:p1.x,y1:p1.y,x2:p2.x,y2:p2.y,stroke:'var(--accent)','stroke-width':WALL_T+6,'stroke-linecap':'round',opacity:0.35,'pointer-events':'none'}));
+      // Resize handles are pushed just past the opening's actual ends (not sitting on top of
+      // them) and made smaller - resizing is rare and can afford to take a little precision;
+      // moving/dragging along the wall should stay frictionless and never land on a handle.
+      var HANDLE_OFFSET = 8, HANDLE_R = 7;
+      [{p:p1, dx:-ux, dy:-uy, end:'start'},{p:p2, dx:ux, dy:uy, end:'end'}].forEach(function(h){
+        var hx = h.p.x + h.dx*HANDLE_OFFSET, hy = h.p.y + h.dy*HANDLE_OFFSET;
+        selG.appendChild(svgEl('circle',{cx:hx, cy:hy, r:HANDLE_R, fill:'var(--accent)', stroke:'#fff','stroke-width':2,'data-role':'handle','data-id':o.id,'data-end':h.end}));
       });
       selectionGroups.push(selG);
     }
@@ -2230,10 +2319,12 @@ function updateLabelButtonVisual(){
 function updateInlinePanel(){
   var panel = document.getElementById('inlinePanel');
   var lvl = currentLevel();
+  var wasFocused = document.body.classList.contains('focus-mode');
 
   if(ui.selectedInteriorId){
     var il = (lvl.interiorLines||[]).find(function(x){ return x.id===ui.selectedInteriorId; });
-    if(!il){ ui.selectedInteriorId=null; document.body.classList.remove('focus-mode'); panel.classList.remove('show'); return; }
+    if(!il){ ui.selectedInteriorId=null; document.body.classList.remove('focus-mode'); exitFocusZoom(); panel.classList.remove('show'); return; }
+    if(!wasFocused){ enterFocusZoom((il.x1+il.x2)/2, (il.y1+il.y2)/2); }
     document.body.classList.add('focus-mode');
     panel.classList.add('show');
     document.getElementById('inlinePanelTitle').textContent = il.kind==='rect' ? 'Interior rectangle' : 'Interior line';
@@ -2255,7 +2346,8 @@ function updateInlinePanel(){
 
   if(ui.selectedLabelId){
     var lab = (lvl.labels||[]).find(function(x){ return x.id===ui.selectedLabelId; });
-    if(!lab){ ui.selectedLabelId=null; document.body.classList.remove('focus-mode'); panel.classList.remove('show'); return; }
+    if(!lab){ ui.selectedLabelId=null; document.body.classList.remove('focus-mode'); exitFocusZoom(); panel.classList.remove('show'); return; }
+    if(!wasFocused){ enterFocusZoom(lab.x, lab.y); }
     document.body.classList.add('focus-mode');
     panel.classList.add('show');
     document.getElementById('inlinePanelTitle').textContent = lab.text || 'Room label';
@@ -2302,7 +2394,16 @@ function updateInlinePanel(){
   }
 
   var o = ui.selectedOpeningId ? lvl.openings.find(function(x){ return x.id===ui.selectedOpeningId; }) : null;
-  document.body.classList.toggle('focus-mode', !!o);
+  if(o){
+    if(!wasFocused){
+      var oe = edges(lvl.vertices).find(function(x){ return x.key===o.wallKey; });
+      if(oe){ var omid = pointAt(oe, o.offset+o.width/2); enterFocusZoom(omid.x, omid.y); }
+    }
+    document.body.classList.add('focus-mode');
+  } else {
+    document.body.classList.remove('focus-mode');
+    exitFocusZoom();
+  }
   if(!o){ panel.classList.remove('show'); return; }
   panel.classList.add('show');
   var shortDefault = (o.type==='window'?'W':'D')+o.num+(o.pairRole==='active'?'A':o.pairRole==='passive'?'P':'');
@@ -2835,6 +2936,7 @@ function startInteriorMoveDrag(id, evt){
     window.removeEventListener('pointerup', onUp);
     activeDragCleanup = null;
     updateInlinePanel();
+    refreshSvg(); // reflects the focus-zoom updateInlinePanel() may have just applied
     scheduleSave();
   }
   window.addEventListener('pointermove', onMove);
@@ -2867,6 +2969,7 @@ function startLabelMoveDrag(id, evt){
     window.removeEventListener('pointerup', onUp);
     activeDragCleanup = null;
     updateInlinePanel();
+    refreshSvg(); // reflects the focus-zoom updateInlinePanel() may have just applied
     scheduleSave();
   }
   window.addEventListener('pointermove', onMove);
@@ -2888,6 +2991,7 @@ function startOpeningMoveDrag(id, evt){
       window.removeEventListener('pointerup', onLockedUp);
       activeDragCleanup = null;
       updateInlinePanel();
+      refreshSvg();
     }
     window.addEventListener('pointermove', onLockedMove);
     window.addEventListener('pointerup', onLockedUp);
@@ -2898,11 +3002,12 @@ function startOpeningMoveDrag(id, evt){
   var group = o.pairId ? lvl.openings.filter(function(x){ return x.pairId===o.pairId; }) : [o];
   var startOffsets = {}; group.forEach(function(m){ startOffsets[m.id] = m.offset; });
   var startOffset = o.offset;
+  var lastClient = {x:evt.clientX, y:evt.clientY};
 
-  function onMove(ev){
+  function applyAt(clientX, clientY){
     var e = edges(currentLevel().vertices).find(function(x){ return x.key===o.wallKey; });
     if(!e) return;
-    var p = svgPoint(ev);
+    var p = svgPoint({clientX:clientX, clientY:clientY});
     var ux=(e.v2.x-e.v1.x)/e.len, uy=(e.v2.y-e.v1.y)/e.len;
     var deltaAlong = (p.x-startP.x)*ux + (p.y-startP.y)*uy;
     var desiredDelta = snap(startOffset + deltaAlong) - startOffset;
@@ -2912,17 +3017,25 @@ function startOpeningMoveDrag(id, evt){
     group.forEach(function(m){ m.offset = startOffsets[m.id] + clampedDelta; });
     refreshSvg();
   }
+  function onMove(ev){
+    lastClient = {x:ev.clientX, y:ev.clientY};
+    updateEdgePanPoint(lastClient.x, lastClient.y);
+    applyAt(lastClient.x, lastClient.y);
+  }
   function onUp(){
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     activeDragCleanup = null;
+    stopEdgePan();
     updateInlinePanel();
+    refreshSvg(); // reflects the focus-zoom updateInlinePanel() may have just applied
     buildScheduleIfActive();
     scheduleSave();
   }
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
   activeDragCleanup = onUp;
+  startEdgePan(function(){ applyAt(lastClient.x, lastClient.y); });
 }
 
 function startHandleDrag(id, end){
@@ -2945,10 +3058,12 @@ function startHandleDrag(id, end){
     return;
   }
 
-  function onMove(ev){
+  var lastClient = null;
+
+  function applyAt(clientX, clientY){
     var e = edges(currentLevel().vertices).find(function(x){ return x.key===o.wallKey; });
     if(!e) return;
-    var p = svgPoint(ev);
+    var p = svgPoint({clientX:clientX, clientY:clientY});
     var along = closestPointParam(e, p);
     if(end==='start'){
       var newOffset = Math.max(0, snap(Math.min(along, o.offset+o.width-MIN_OPENING_W)));
@@ -2960,16 +3075,23 @@ function startHandleDrag(id, end){
     }
     refreshSvg();
   }
+  function onMove(ev){
+    lastClient = {x:ev.clientX, y:ev.clientY};
+    updateEdgePanPoint(lastClient.x, lastClient.y);
+    applyAt(lastClient.x, lastClient.y);
+  }
   function onUp(){
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     activeDragCleanup = null;
+    stopEdgePan();
     buildScheduleIfActive();
     scheduleSave();
   }
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
   activeDragCleanup = onUp;
+  startEdgePan(function(){ if(lastClient) applyAt(lastClient.x, lastClient.y); });
 }
 
 /* ============================== LEVELS ============================== */

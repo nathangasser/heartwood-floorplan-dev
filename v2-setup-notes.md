@@ -198,6 +198,36 @@ No AWS changes needed - frontend only. Re-push index.html to beta and retest: dr
 across a wall and confirm the header/toolbar don't flicker/hide until you lift your finger, and
 that the drawing no longer visibly jumps at the start of the drag.
 
+## Round 6 - deeper dive on window/door dragging - BUILT
+Follow-up after the first drag fix (deferred focus-mode panel reveal). Nathan reported two more
+things: the layout shift still happens (now on release instead of drag-start), and dragging an
+*already-selected* opening along the wall felt broken. Investigated both and built fixes for all
+three root causes found:
+
+1. Silent-deselect bug (the real cause of "can't drag along the wall while focused"): once an
+   opening is selected, a decorative accent-colored highlight wash gets drawn on top of it along
+   the whole wall band. That shape had no data-role, so most taps on the body of an already-
+   selected opening were landing on nothing recognized and silently deselecting it instead of
+   grabbing it to move. Fixed by making that highlight `pointer-events:none` so taps fall through
+   to the opening's own (already-existing) generous move-hit-target underneath.
+2. Resize handles were sitting exactly at the opening's two ends, competing with the move target
+   for any tap near an edge - especially bad on narrower windows. Per Nathan's call (moving should
+   be frictionless, resizing is rare and can take a little precision), handles are now smaller
+   (r:11->7) and pushed 8 units past the opening's actual ends instead of sitting on top of them.
+3. Layout-shift-on-focus (Nathan's zoom idea): instead of leaving the whole plan visible through
+   the header/toolbar-hide reflow, selecting an opening/label/interior item now zooms in a
+   conservative 1.3x centered on that item (reusing the same viewState the pinch-zoom/+/- buttons
+   already drive), so the transition reads as "zooming in on what you tapped" rather than an
+   unrelated jump. Exiting focus mode restores the exact pan/zoom you had before. If you'd already
+   manually zoomed in further than 1.3x, it keeps your zoom level and just re-centers.
+4. Slow edge auto-pan: while dragging a window/door (move or resize handle) near the edge of the
+   now-zoomed-in view, the view slowly pans to follow so the item never runs out of visible canvas
+   mid-drag. Deliberately gentle per Nathan's ask - a following-nudge, not a fast auto-scroll.
+No AWS changes needed - frontend only, re-push index.html to beta and retest: select a window,
+confirm you can immediately drag it again without it deselecting or grabbing a handle by mistake;
+confirm the zoom-in on select feels smooth rather than jumpy; confirm dragging a window far along
+a long wall slowly pans the view to follow instead of losing it off-screen.
+
 ## "Window / Door Schedule" renamed to "Window Schedule" - BUILT
 Renamed everywhere it appeared: the tab label and both PDF export page headers. No AWS changes -
 frontend only, re-push to beta and retest along with the banner fix.
