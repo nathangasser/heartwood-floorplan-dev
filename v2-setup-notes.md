@@ -63,4 +63,35 @@ flow to use them is the next fast-follow, not done in this pass.
 ## Not yet done
 - No local-to-cloud migration for old plans (per your call - starting fresh is fine)
 - No Make.com/Airtable auto-archive webhook (planned fast-follow, needs airtableRecordId field added)
-- Real-device testing (task 9) - not yet run
+
+## Round 1 real-device testing (beta branch) - fixes applied
+- Bug: "+ New Plan" silently did nothing. Root cause: doStartNew() was declared inside wireUp()'s
+  closure, unreachable from the top-level HWR Plans dialog code - threw a ReferenceError in the
+  console, closed the dialog, and stopped. Fixed by exposing it as window.doStartNew (same pattern
+  already used for updateWindowDefaultBadge elsewhere in the file). Also dropped the redundant
+  "save first?" confirmation for this entry point (redundant since it's a deliberate action from
+  a list screen) and added a flush of any pending save before switching plans.
+- UX change: removed the status filter chips row per your feedback. Replaced with a single
+  "Show archived plans" checkbox - default view is active-only, checking it reveals archived
+  plans with a Restore button. Required also updating the Lambda's listPlans() to stop excluding
+  archived items server-side (now returns everything with an `archived` flag; filtering moved
+  client-side).
+- ACTION NEEDED: redeploy the Lambda - copy the updated index.mjs into the AWS console and
+  Deploy again. The frontend fix requires no AWS changes, just re-pushing index.html to beta.
+
+## Round 2 - menu cleanup + naming (per your feedback)
+- Removed the status badge from each HWR Plans row entirely. The Status field itself (Draft/
+  Sold/In Progress/Complete, via Options menu) is still there - only the list badge is gone.
+  Flagged in case you want status dropped altogether, not just hidden from the list.
+- New plans now require a name up front (prompted immediately on "+ New Plan" / File > New,
+  before the blank canvas appears) - no more silent "Untitled Floor Plan" duplicates piling up
+  in the cloud.
+- Header simplified to exactly three buttons: File, Options, User.
+  - File now includes "HWR Plans…" as its first item, and "Export…" collapsed PDF/CSV into
+    one item with a sub-menu instead of two separate buttons.
+  - User button: shows "Sign In" when signed out (tapping calls Google's prompt() directly -
+    no more full-width rendered button/email crowding the header), shows "User" when signed
+    in (tapping opens a menu titled with your email, with Sign Out).
+  - Any action needing sign-in (HWR Plans) now shows a real dialog with a "Sign In" button,
+    not just a toast.
+- No AWS changes needed for this round - frontend only. Re-push index.html to beta and retest.

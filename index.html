@@ -248,11 +248,7 @@
   <div id="shareBar">
     <button id="fileMenuBtn">File &#9662;</button>
     <button id="optionsMenuBtn">Options &#9662;</button>
-    <button id="hwrPlansBtn">HWR Plans</button>
-    <div id="authArea" style="margin-left:auto; display:flex; align-items:center; gap:8px;">
-      <span id="authStatus" style="display:none; font-size:11.5px; font-weight:700;"></span>
-      <div id="googleSignInBtn"></div>
-    </div>
+    <button id="userMenuBtn">Sign In</button>
   </div>
 
   <header>
@@ -982,21 +978,33 @@ function decodeJwt(token){
   }catch(e){ return null; }
 }
 
+function updateUserMenuButton(){
+  var btn = document.getElementById('userMenuBtn');
+  if(btn) btn.textContent = isSignedIn() ? 'User' : 'Sign In';
+}
+
 function handleGoogleCredential(response){
   var claims = decodeJwt(response.credential);
   if(!claims){ toast('Sign-in failed'); return; }
   googleIdToken = response.credential;
   googleTokenExp = claims.exp;
   currentUserEmail = claims.email;
-  var statusEl = document.getElementById('authStatus');
-  statusEl.textContent = 'Signed in: ' + currentUserEmail;
-  statusEl.style.display = '';
-  var btnEl = document.getElementById('googleSignInBtn');
-  if(btnEl) btnEl.style.display = 'none';
+  updateUserMenuButton();
   toast('Signed in');
   syncToCloud(); // catch up any edits made before sign-in completed
 }
 
+function signOutUser(){
+  googleIdToken = null; googleTokenExp = 0; currentUserEmail = null;
+  if(window.google && google.accounts && google.accounts.id){ google.accounts.id.disableAutoSelect(); }
+  updateUserMenuButton();
+  setCloudIndicator('');
+  toast('Signed out');
+}
+
+// No inline rendered Google button (its fixed appearance and full-width email display were
+// crowding the header) - a small "Sign In" button calls prompt() directly instead. This is
+// Google's own documented pattern for custom-styled sign-in triggers.
 function initGoogleAuth(){
   if(!window.google || !google.accounts || !google.accounts.id){
     setTimeout(initGoogleAuth, 300); // gsi/client script may still be loading
@@ -1007,9 +1015,21 @@ function initGoogleAuth(){
     callback: handleGoogleCredential,
     auto_select: true
   });
-  var container = document.getElementById('googleSignInBtn');
-  if(container) google.accounts.id.renderButton(container, { theme:'outline', size:'medium', type:'standard' });
+  updateUserMenuButton();
   google.accounts.id.prompt(); // silent re-sign-in via One Tap if there's an eligible session
+}
+
+// Any action that needs cloud access (HWR Plans, etc.) routes through here instead of a toast
+// that's easy to miss - a real dialog with a direct "Sign In" action.
+function requireSignInDialog(message){
+  showConfirmDialog({
+    title: 'Sign in required',
+    message: message || 'Sign in with your heartwoodrestore.com account to continue.',
+    okLabel: 'Sign In',
+    onConfirm: function(){
+      if(window.google && google.accounts && google.accounts.id) google.accounts.id.prompt();
+    }
+  });
 }
 function updateUndoButton(){
   var btn = document.getElementById('undoBtn');
@@ -2942,11 +2962,33 @@ function showMenuDialog(title, items){
   document.body.appendChild(ov);
 }
 
+// Every new plan requires a real name up front, instead of silently defaulting to "Untitled
+// Floor Plan" - otherwise the cloud plan list fills up with indistinguishable duplicates.
+function promptNewPlanName(onConfirmed){
+  showPromptDialog({
+    title: 'Name this plan',
+    defaultValue: '',
+    placeholder: 'e.g. Martinez Kitchen',
+    okLabel: 'Start Plan',
+    onSubmit: function(name){
+      name = (name||'').trim();
+      if(!name){ toast('A name is required to start a new plan'); return; }
+      onConfirmed(name);
+    }
+  });
+}
+function startNewPlanFlow(){
+  promptNewPlanName(function(name){
+    if(window.doStartNew) window.doStartNew(name);
+    else toast('Could not start a new plan - try File ▾ New instead');
+  });
+}
+
 // The company-wide plan browser: search + status filter over every non-archived cloud plan,
 // tap a row to load it, "+ New Plan" to start fresh. Not "My Plans" - every plan belongs to
 // the shop, not to whoever created it (roles here are display modes, not permission boundaries).
 function showHwrPlansDialog(){
-  if(!isSignedIn()){ toast('Sign in (top right) to see cloud plans'); return; }
+  if(!isSignedIn()){ requireSignInDialog('Sign in to see and manage cloud plans.'); return; }
   closeDialog();
   var ov = document.createElement('div'); ov.id='dialogOverlay';
   var card = document.createElement('div'); card.id='dialogCard';
@@ -2959,8 +3001,7 @@ function showHwrPlansDialog(){
   newBtn.textContent = '+ New Plan';
   newBtn.addEventListener('click', function(){
     closeDialog();
-    if(window.doStartNew) window.doStartNew();
-    else toast('Could not start a new plan - try File ▾ New instead');
+    startNewPlanFlow();
   });
   card.appendChild(newBtn);
 
@@ -3013,10 +3054,9 @@ function showHwrPlansDialog(){
       var when = p.lastEditedAt ? new Date(p.lastEditedAt).toLocaleString() : '';
       var metaBits = [p.address, when, p.lastEditedBy].filter(Boolean);
       metaEl.textContent = metaBits.join(' · ');
-      var statusEl = document.createElement('span');
-      statusEl.textContent = p.status || 'Draft';
-      statusEl.style.cssText='display:inline-block; margin-top:4px; font-size:11px; font-weight:800; padding:2px 8px; border-radius:10px; background:var(--line);';
-      info.appendChild(nameEl); info.appendChild(metaEl); info.appendChild(statusEl);
+      // No status badge here - active vs. archived (governed by the toggle above) is the
+      // only state that matters at a glance in this list.
+      info.appendChild(nameEl); info.appendChild(metaEl);
       info.addEventListener('click', function(){
         closeDialog();
         toast('Loading plan…');
@@ -3506,7 +3546,17 @@ function wireUp(){
       { label: 'Delete "'+currentLevel().name+'"', onClick: deleteCurrentLevel, danger: true }
     ]);
   });
-  document.getElementById('hwrPlansBtn').addEventListener('click', showHwrPlansDialog);
+  document.getElementById('userMenuBtn').addEventListener('click', function(){
+    if(isSignedIn()){
+      showMenuDialog('Signed in as ' + currentUserEmail, [
+        { label: 'Sign out', onClick: signOutUser, danger: true }
+      ]);
+    } else if(window.google && google.accounts && google.accounts.id){
+      google.accounts.id.prompt();
+    } else {
+      toast('Sign-in is still loading — try again in a moment');
+    }
+  });
 
   document.getElementById('undoBtn').addEventListener('click', undo);
   document.getElementById('title').addEventListener('input', function(){
@@ -3555,12 +3605,12 @@ function wireUp(){
     });
   });
 
-  function doStartNew(){
+  function doStartNew(name){
     // Flush whatever's pending for the plan we're leaving before switching state out from
     // under it - otherwise a fast tap right after an edit could drop that last edit on the
     // floor (the debounced save timer would fire later against the NEW, already-reset state).
     if(saveTimer){ clearTimeout(saveTimer); doSave(); }
-    state.title = 'Untitled Floor Plan';
+    state.title = (name && name.trim()) ? name.trim() : 'Untitled Floor Plan';
     state.address = '';
     state.levels = [ makeLevel('Level 1') ];
     state.activeLevelIndex = 0;
@@ -3591,18 +3641,24 @@ function wireUp(){
   window.doStartNew = doStartNew;
   function fileNew(){
     showMenuDialog('Start a new plan?', [
-      { label: 'Save First, Then Start New', onClick: function(){ exportJson(); doStartNew(); } },
-      { label: 'Start New Without Saving', onClick: doStartNew, danger: true }
+      { label: 'Save First, Then Start New', onClick: function(){ exportJson(); startNewPlanFlow(); } },
+      { label: 'Start New Without Saving', onClick: startNewPlanFlow, danger: true }
     ]);
   }
 
   document.getElementById('fileMenuBtn').addEventListener('click', function(){
     showMenuDialog('File', [
+      { label: 'HWR Plans\u2026', onClick: showHwrPlansDialog },
       { label: 'New\u2026', onClick: fileNew },
       { label: 'Save', onClick: exportJson },
       { label: 'Open', onClick: function(){ document.getElementById('fileInput').click(); } },
-      { label: 'Export PDF', onClick: exportPdf },
-      { label: 'Export CSV', onClick: exportCsv },
+      { label: 'Export\u2026', onClick: function(){
+          showMenuDialog('Export', [
+            { label: 'PDF', onClick: exportPdf },
+            { label: 'CSV', onClick: exportCsv }
+          ]);
+        }
+      },
       { label: 'Share', onClick: shareJson },
       { label: 'Address\u2026', onClick: editAddress }
     ]);
