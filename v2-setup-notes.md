@@ -2,6 +2,75 @@
 
 Running record of config values created during AWS/Google setup. Reference this when writing frontend/Lambda code.
 
+## Phase 2b - per-opening conflict resolution (see phase2b-conflict-resolution-notes.md for the
+original design decisions - Nathan brought that file in from a separate session)
+
+### Round 9a - wall auto-lock in crew view - BUILT
+Crew view now always behaves as if walls are locked (`wallsEffectivelyLocked()`), regardless of
+the level's real `locks.walls` flag - never mutates that flag, so a manager's own lock choice for
+full view is always preserved exactly as they left it. Only walls are covered - moving/resizing
+existing openings is still fully available to crew, unchanged. No AWS changes - frontend only.
+
+### Round 9b - Lambda: openings/labels move to per-key maps, per-key merge - BUILT, NEEDS DEPLOY
+This is the bigger structural piece of Phase 2b. index.mjs's savePlan() is substantially
+rewritten. What changed and why:
+
+- Two separate conflict mechanisms now instead of one:
+  1. **Structural** (levels list, each level's vertices/locks/name/interiorLines, plus
+     top-level fields like title/columnVisibility) - still a single whole-plan optimistic-lock
+     gate, same idea as before, but scoped to a new `structuralLastEditedAt` field instead of
+     the old `lastEditedAt` - so someone else's pure opening/label edit doesn't falsely trip a
+     structural conflict for you (this was the key subtlety: if it shared the old field, two
+     people editing different windows would each see the other's save as "changing the plan"
+     and get spurious structural conflicts once any concurrent activity was happening).
+  2. **Openings and labels** - each level's `openings`/`labels` moved from an array to a map
+     keyed by id, with each entry carrying its own `lastEditedAt`. On save, the Lambda merges
+     key-by-key against what's stored: different keys touched by different people merge
+     silently; the same key touched by both since this client's last load is a real conflict,
+     collected into a `conflicts` array in the response (empty when everything merged clean).
+- Deletes go through the same per-key comparison as edits, via a `{__deleted:true,
+  lastEditedAt}` tombstone entry - so deleting an opening someone just edited is correctly
+  flagged as a conflict too, not silently applied.
+- A client resending an opening/label it never actually touched (happens every save, since the
+  whole map goes out each time) is recognized as a no-op via a content-equality check, even if
+  its baseline timestamp is stale - this is what keeps "different people, different openings"
+  silent instead of spuriously conflicting.
+- Backward compatible with plans saved under the old schema: they simply have no
+  openingsByLevel/labelsByLevel/structuralLastEditedAt yet, which the merge code treats as
+  empty/unset - no migration script, they migrate themselves on their next save.
+- Verified the merge algorithm in isolation (6 scenarios: different-opening silent merge,
+  same-opening conflict, stale-but-content-unchanged resend, delete-vs-concurrent-edit conflict,
+  clean delete, brand-new key) - all behaved as intended.
+
+### Round 9b-fix - closed a resurrection gap - BUILT, NEEDS REDEPLOY (supersedes the version above)
+Found this while starting the frontend piece, before it shipped: the original merge deleted a
+key outright once removed. But a client sends its whole openings/labels map on every save, so
+if Person A loaded before Person B deleted a window, and A's next autosave landed before A's
+5-minute poll caught up, A's unchanged resend of that window would look identical to "brand new
+opening" to the merge logic - silently resurrecting something B deliberately deleted.
+
+Fixed by keeping tombstones forever instead of removing the key - a `{__deleted:true,
+lastEditedAt}` entry now stays in the map permanently once something's deleted, so the merge can
+tell "never existed" apart from "existed, got deleted." A stale, unknowing resend of a now-deleted
+item is treated as a conflict (surfaces to the person that it was deleted) rather than a silent
+undo. Tombstones are a few bytes each - not a real cost concern at this scale.
+Re-verified with 4 more scenarios (resurrection attempt correctly blocked, own-delete stale
+resend is a harmless no-op, double-delete no-op, brand-new key still works) - all correct.
+
+**ACTION NEEDED (you): copy the updated index.mjs into the Lambda console and hit Deploy again**
+(this replaces what you just deployed - same table, same env vars, same routes, no other AWS
+changes). Frontend work is paused until this redeploy is confirmed, since it needs to build
+around the tombstone shape (skip __deleted entries when reading, understand `theirs: 'deleted'`
+as a possible conflict shape) rather than the version without it.
+
+**Do not push the frontend yet** - the frontend still sends the old whole-plan shape
+(`data.levels[i].openings` as an array, single `expectedLastEditedAt`). The Lambda's PUT handler
+now expects `openingsByLevel`/`labelsByLevel` as separate top-level fields and
+`expectedStructuralEditedAt` instead. Once deployed, next step is adapting
+stateForCloud()/loadCloudPlanIntoState()/syncToCloud() to the new shape (Round 9c, not started) -
+holding off on the frontend push until that's built and tested, so beta doesn't briefly bounce
+between mismatched schemas.
+
 ## Google OAuth (Sign-In With Google)
 - Client ID: `729662824435-u239ge82b6kc7v4pqc0qrhloqqe0u6ga.apps.googleusercontent.com`
 - Consent screen type: Internal (restricts to heartwoodrestore.com automatically)
@@ -307,6 +376,50 @@ Link, open it in a private window/second device, confirm it opens trimmed and la
 confirm "Switch to Full View" restores everything and is remembered on that device even after
 closing and reopening the tab; confirm your own normal (non-shared-link) usage still opens full
 view as always.
+
+## Round 9c - Frontend: adapt to the keyed-map shape - BUILT, not yet tested
+Internal app state is unchanged - lvl.openings/lvl.labels are still plain arrays everywhere
+(drawing, dragging, schedule, PDF export, all of it). The conversion to/from the cloud's map
+shape happens only at the sync boundary:
+
+- Each opening/label now carries a `lastEditedAt` field (defaults to null when created or when
+  restored from data that predates this). It's the per-key baseline from Decision 2 - not shown
+  anywhere in the UI.
+- `lastKnownKeysByLevel` - a new module-level snapshot of {levelId: {openings:{id:lastEditedAt},
+  labels:{id:lastEditedAt}}} captured after every load and every successful save
+  (captureKnownKeysFromState()). This is how a local deletion gets detected: an id present here
+  but missing from the current array gets a {__deleted:true, lastEditedAt} tombstone synthesized
+  when building the next save's payload.
+- `stateForCloud()` renamed to `buildCloudPayload()` - now returns `{data, openingsByLevel,
+  labelsByLevel}` instead of just a data blob. `data.levels[i]` no longer carries
+  openings/labels arrays; those travel separately, keyed by level id then item id.
+- `syncToCloud()` sends the new shape and `expectedStructuralEditedAt` (was
+  `expectedLastEditedAt`) for the whole-plan structural gate.
+- New `applySyncResult(item, conflicts)` reconciles the PUT response back onto local state -
+  critically, flows the server-assigned lastEditedAt back onto each opening/label (skipping this
+  would make every next save think its baseline is stale and falsely conflict with itself),
+  removes anything the server confirms is gone, and re-captures the known-keys baseline.
+- **Interim conflict handling** (placeholder for Round 9d's real dialog): when the response
+  includes conflicts, this applies whichever version the server kept and toasts that it
+  happened ("their version was kept, redo yours if still needed") - not the scoped one-at-a-time
+  "keep mine / keep theirs" dialog from Decision 3 yet, but safe: nothing loops forever trying to
+  resave a rejected change, and nothing is silently lost without the user finding out.
+- `handleSaveConflict()` (the 409 dialog) now only fires for STRUCTURAL conflicts - renamed
+  fields to match (structuralLastEditedAt), same "keep mine / discard mine" choice as before.
+- `loadCloudPlanIntoState()` gained `applyServerOpeningsAndLabels()`, which reconstructs the
+  array shape from the cloud's map shape (skipping deletion tombstones) - with a fallback that
+  does nothing if a plan predates this change entirely, in which case whatever applyLoadedState
+  already restored from the old array shape is used as-is (migrates itself on next save, same
+  backward-compat approach as the Lambda side).
+- Verified the full round trip in isolation (first save, clean resend with zero conflicts,
+  edit+save with correct lastEditedAt reconciliation, delete+tombstone, and a stale second
+  client's resurrection attempt correctly blocked as a conflict) - all 5 scenarios came out right.
+
+**Ready to push to beta and test** - this is the checkpoint: confirm normal single-device
+save/load still works with zero visible difference, and that two people editing different
+openings on the same plan merge silently with no interruption. True same-opening conflicts will
+work (server-side) but the UI response is still the interim toast-and-overwrite, not final -
+that's Round 9d next, not built yet.
 
 ## "Window / Door Schedule" renamed to "Window Schedule" - BUILT
 Renamed everywhere it appeared: the tab label and both PDF export page headers. No AWS changes -

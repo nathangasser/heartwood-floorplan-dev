@@ -456,8 +456,27 @@ var state = {
   // exists (see init()/doStartNew()) so it's stable before the first cloud save ever happens.
   planId: null,
   status: 'Draft',
-  lastEditedAt: null // the lastEditedAt we last loaded/saved with - used for conflict detection
+  lastEditedAt: null, // whole-record - display + checkForNewerVersion polling, unrelated to conflicts now
+  // Phase 2b: structural changes (levels/vertices/locks/name/interiorLines, top-level fields)
+  // still use a single whole-plan optimistic-lock baseline - this is it. Openings/labels have
+  // moved to their own per-key baselines (each opening/label's own lastEditedAt field) instead.
+  structuralLastEditedAt: null
 };
+
+// Baseline snapshot of {levelId: {openings:{id:lastEditedAt}, labels:{id:lastEditedAt}}} as of
+// the last successful load or save - lets buildCloudPayload() tell "I deleted this since last time"
+// (present here, absent from the current array) apart from "I never knew this existed" (absent
+// from here too). Rebuilt by captureKnownKeysFromState() after every load/save.
+var lastKnownKeysByLevel = {};
+function captureKnownKeysFromState(){
+  lastKnownKeysByLevel = {};
+  state.levels.forEach(function(lvl){
+    var openings = {}, labels = {};
+    (lvl.openings||[]).forEach(function(o){ openings[o.id] = o.lastEditedAt || null; });
+    (lvl.labels||[]).forEach(function(l){ labels[l.id] = l.lastEditedAt || null; });
+    lastKnownKeysByLevel[lvl.id] = { openings: openings, labels: labels };
+  });
+}
 
 var ui = {
   tab: 'plan',
@@ -914,16 +933,44 @@ function apiFetch(path, opts){
   return fetch(API_BASE + path, opts);
 }
 
-// Clone of state safe to send to the cloud. The base64 photo previews (o.photos) are stripped -
+// Builds everything syncToCloud() needs to send: `data` (structural - levels' vertices/locks/
+// name/interiorLines and top-level fields, openings/labels stripped out), and openingsByLevel/
+// labelsByLevel (Phase 2b - each level's openings/labels as a map keyed by id, each entry
+// carrying its own lastEditedAt baseline). The base64 photo previews (o.photos) are stripped -
 // those would blow past DynamoDB's 400KB item limit fast - but o.photoKeys (the small S3 key
 // references, uploaded separately via uploadPhotoToCloud) pass through untouched. That's how a
 // photo actually travels between devices: the key syncs in the data blob, the pixels live in S3.
-function stateForCloud(){
+//
+// Anything present in lastKnownKeysByLevel (captured at last load/save) but missing from the
+// CURRENT array gets a {__deleted:true, lastEditedAt} tombstone synthesized here - that's how
+// the server finds out about a local deletion, since it otherwise only sees whatever's still in
+// the array right now.
+function buildCloudPayload(){
   var clone = JSON.parse(JSON.stringify(state));
+  var openingsByLevel = {}, labelsByLevel = {};
+
   clone.levels.forEach(function(lvl){
-    (lvl.openings||[]).forEach(function(o){ delete o.photos; });
+    var known = lastKnownKeysByLevel[lvl.id] || { openings:{}, labels:{} };
+
+    var oMap = {};
+    (lvl.openings||[]).forEach(function(o){ delete o.photos; oMap[o.id] = o; });
+    Object.keys(known.openings).forEach(function(id){
+      if(!(id in oMap)) oMap[id] = { __deleted:true, lastEditedAt: known.openings[id] };
+    });
+    openingsByLevel[lvl.id] = oMap;
+
+    var lMap = {};
+    (lvl.labels||[]).forEach(function(l){ lMap[l.id] = l; });
+    Object.keys(known.labels).forEach(function(id){
+      if(!(id in lMap)) lMap[id] = { __deleted:true, lastEditedAt: known.labels[id] };
+    });
+    labelsByLevel[lvl.id] = lMap;
+
+    delete lvl.openings; // moved out to openingsByLevel - not part of the structural data blob
+    delete lvl.labels;   // moved out to labelsByLevel
   });
-  return clone;
+
+  return { data: clone, openingsByLevel: openingsByLevel, labelsByLevel: labelsByLevel };
 }
 
 // Flat list of every S3 key referenced anywhere in the plan - sent alongside `data` so the
@@ -944,13 +991,16 @@ function collectPhotoKeys(){
 function syncToCloud(){
   if(!isSignedIn()){ setCloudIndicator(''); return; }
   if(!state.planId) return; // shouldn't happen - init()/doStartNew() always assign one
+  var payload = buildCloudPayload();
   var body = {
     jobName: state.title,
     address: state.address,
     status: state.status || 'Draft',
-    data: stateForCloud(),
+    data: payload.data,
+    openingsByLevel: payload.openingsByLevel,
+    labelsByLevel: payload.labelsByLevel,
     photos: collectPhotoKeys(),
-    expectedLastEditedAt: state.lastEditedAt
+    expectedStructuralEditedAt: state.structuralLastEditedAt
   };
   setCloudIndicator('Syncing…');
   apiFetch('/plans/' + state.planId, { method:'PUT', body: JSON.stringify(body) })
@@ -959,13 +1009,13 @@ function syncToCloud(){
         return res.json().then(function(conflict){ handleSaveConflict(conflict); });
       }
       if(!res.ok) throw new Error('save failed: ' + res.status);
-      return res.json().then(function(saved){
-        state.lastEditedAt = saved.lastEditedAt;
+      return res.json().then(function(result){
+        applySyncResult(result);
         lastStableSnapshot = JSON.stringify(state); // keep the "any unsaved edits?" signal accurate
         lastSuccessfulSyncAt = Date.now();
         unsyncedSinceAt = null; // this is what actually clears the unsynced-work banner
         updateUnsyncedBanner(); // react immediately instead of waiting up to 30s for the next timer tick
-        setCloudIndicator('Synced');
+        setCloudIndicator(result.conflicts && result.conflicts.length ? 'Synced - review needed' : 'Synced');
         return persistSet(SAVE_KEY, JSON.stringify(state));
       });
     })
@@ -973,6 +1023,56 @@ function syncToCloud(){
       console.error('Cloud sync failed', err);
       setCloudIndicator('Not synced');
     });
+}
+
+// Reconciles local state after a successful PUT (200, body: {item, conflicts}).
+// Server-assigned lastEditedAt values flow back onto each opening/label here - this is critical,
+// not cosmetic: without it, the NEXT save would think its baseline is stale and would falsely
+// conflict with itself. Anything the server confirms doesn't exist anymore (our own delete
+// landing, or discovered deleted elsewhere) gets removed locally to match.
+//
+// Interim conflict handling: this applies whichever version the server kept (the other side's,
+// per Decision 3 - true conflicts never silently overwrite) and toasts that it happened, so nothing
+// is lost without at least being surfaced. This is a placeholder for the scoped "keep mine / keep
+// theirs" one-at-a-time dialog planned next (Phase 2b) - not the final experience.
+function applySyncResult(result){
+  var item = result.item;
+  state.lastEditedAt = item.lastEditedAt;
+  state.structuralLastEditedAt = item.structuralLastEditedAt;
+
+  var hadConflicts = !!(result.conflicts && result.conflicts.length);
+
+  state.levels.forEach(function(lvl){
+    var oMap = (item.openingsByLevel && item.openingsByLevel[lvl.id]) || {};
+    lvl.openings = (lvl.openings||[]).filter(function(o){
+      var merged = oMap[o.id];
+      if(!merged || merged.__deleted) return false; // confirmed gone
+      var localPhotos = o.photos; // never sent/returned by the server - preserve it locally
+      Object.assign(o, merged);
+      o.photos = localPhotos;
+      return true;
+    });
+
+    var lMap = (item.labelsByLevel && item.labelsByLevel[lvl.id]) || {};
+    lvl.labels = (lvl.labels||[]).filter(function(l){
+      var merged = lMap[l.id];
+      if(!merged || merged.__deleted) return false;
+      Object.assign(l, merged);
+      return true;
+    });
+  });
+
+  captureKnownKeysFromState();
+
+  if(hadConflicts){
+    refreshSvg();
+    buildScheduleIfActive();
+    updateInlinePanel();
+    if(window.updateWindowDefaultBadge) window.updateWindowDefaultBadge();
+    toast(result.conflicts.length===1
+      ? 'A change was also made elsewhere to the same item - their version was kept. Redo yours if still needed.'
+      : result.conflicts.length + ' changes were also made elsewhere to the same items - their versions were kept. Redo yours if still needed.');
+  }
 }
 
 function dataUrlToBlob(dataUrl){
@@ -1012,11 +1112,15 @@ function uploadPhotoToCloud(openingId, slot, dataUrl){
 
 // Someone else saved this plan since we last loaded it. Ask which version to keep rather
 // than silently overwriting - this is the whole point of tracking expectedLastEditedAt.
+// Phase 2b: this now only fires for STRUCTURAL conflicts (walls/joints/levels) - a 409 response
+// with a StructuralConflict error. Opening/label conflicts no longer 409 at all; they come back
+// as a 200 with a conflicts[] list, handled by applySyncResult() instead. Structural changes stay
+// all-or-nothing per Decision 1, so this dialog is unchanged in spirit - just renamed fields.
 function handleSaveConflict(conflict){
   setCloudIndicator('Conflict - action needed');
-  showMenuDialog('This plan changed elsewhere', [
+  showMenuDialog('Structural changes (walls/levels) were also made elsewhere', [
     { label: 'Keep my changes (overwrite theirs)', onClick: function(){
-        state.lastEditedAt = conflict.current.lastEditedAt;
+        state.structuralLastEditedAt = conflict.current.structuralLastEditedAt;
         syncToCloud();
       }
     },
@@ -1113,15 +1217,41 @@ function resolvePhotoUrls(rec){
   });
 }
 
+// Phase 2b: reconstructs each level's openings/labels ARRAYS (the app's internal shape,
+// unchanged everywhere else) from the cloud's keyed-map shape (rec.openingsByLevel/
+// rec.labelsByLevel), skipping deletion tombstones. Falls back to leaving whatever
+// applyLoadedState already restored from the old array-shape data.levels[i].openings/.labels -
+// for a plan that's never been saved under the new schema, that's still the real data; it'll be
+// sent up in the new shape (and this fallback stops mattering) on this plan's next save.
+function applyServerOpeningsAndLabels(rec){
+  var hasNewShape = !!(rec.openingsByLevel || rec.labelsByLevel);
+  if(!hasNewShape) return;
+  state.levels.forEach(function(lvl){
+    var oMap = (rec.openingsByLevel && rec.openingsByLevel[lvl.id]) || {};
+    lvl.openings = Object.keys(oMap)
+      .filter(function(id){ return !oMap[id].__deleted; })
+      .map(function(id){ return Object.assign({id:id}, oMap[id]); });
+    lvl.openings.forEach(migrateOpeningToV3);
+
+    var lMap = (rec.labelsByLevel && rec.labelsByLevel[lvl.id]) || {};
+    lvl.labels = Object.keys(lMap)
+      .filter(function(id){ return !lMap[id].__deleted; })
+      .map(function(id){ return Object.assign({id:id}, lMap[id]); });
+  });
+}
+
 // Pulls a full plan record (as returned by GET/PUT /plans/{id}) into working state.
 function loadCloudPlanIntoState(rec){
   applyLoadedState(rec.data || {});
+  applyServerOpeningsAndLabels(rec);
   resolvePhotoUrls(rec);
   state.planId = rec.planId;
   state.title = rec.jobName || state.title;
   state.address = rec.address || state.address;
   state.status = rec.status || 'Draft';
   state.lastEditedAt = rec.lastEditedAt || null;
+  state.structuralLastEditedAt = rec.structuralLastEditedAt || null;
+  captureKnownKeysFromState();
   ui.selectedOpeningId = null; ui.selectedLabelId = null;
   setMode('move');
   populateLevelSelect();
@@ -1159,8 +1289,11 @@ function openPlanById(planId){
    Crew view is a trimmed-down UI (no drawing toolbar, no level rename/add, no plan-management
    File/Options items, read-only title) meant to be the default for anyone opening a shared
    link - full view is one menu tap away ("Switch to Full View"). This is a UI display mode, not
-   a real permission boundary - crew can still move/resize existing openings and drag walls in
-   the default Move mode, and switching to full view gives complete access, same as before.
+   a real permission boundary - crew can still move/resize existing openings in the default Move
+   mode, and switching to full view gives complete access, same as before. Walls are the one
+   exception: crew view always behaves as if walls are locked (see wallsEffectivelyLocked below),
+   since wall/joint changes are structural and stay whole-plan-conflict-level (Phase 2b), so
+   keeping crew off them in the first place cuts down on that conflict surface.
    Precedence: an explicit ?view= param (from a share link) always wins and updates the
    per-device remembered preference; with no param, the remembered preference is used; with
    neither, it defaults to full view so normal (non-shared-link) app usage is unaffected. */
@@ -1185,6 +1318,14 @@ function setViewMode(mode){
   ui.viewMode = mode;
   try{ localStorage.setItem(VIEW_PREF_KEY, mode); }catch(e){}
   applyViewMode();
+}
+
+// Crew view always treats walls as locked, on top of whatever the level's own lock flag says -
+// this never mutates lvl.locks.walls, so a manager's own lock choice for full view is always
+// remembered exactly as they left it. Only walls are covered (not openings) - moving/resizing
+// existing windows and doors is still fully available in crew view, per the Crew Mode design.
+function wallsEffectivelyLocked(lvl){
+  return ui.viewMode==='crew' || !!(lvl && lvl.locks && lvl.locks.walls);
 }
 
 var pendingSharedPlanId = null;
@@ -1381,6 +1522,7 @@ function loadState(cb){
 function migrateOpeningToV3(o){
   if(!o.photos) o.photos = {interior:null, exterior:null};
   if(!o.photoKeys) o.photoKeys = {interior:null, exterior:null};
+  if(o.lastEditedAt===undefined) o.lastEditedAt = null; // Phase 2b per-opening conflict baseline
   if(o.operation !== undefined) return o; // already current format
   if(o.type==='window'){
     var map = {fixed:'Fixed', doubleHung:'Double Hung', casement:'Casement'};
@@ -1433,6 +1575,7 @@ function applyLoadedState(parsed){
   function migrateLevel(lvl){
     (lvl.openings||[]).forEach(migrateOpeningToV3);
     if(!lvl.labels) lvl.labels = [];
+    lvl.labels.forEach(function(l){ if(l.lastEditedAt===undefined) l.lastEditedAt = null; });
     if(!lvl.interiorLines) lvl.interiorLines = [];
     if(!lvl.locks) lvl.locks = {walls:false, openings:false};
     return lvl;
@@ -2165,6 +2308,7 @@ function convertToFrenchPair(o){
     swingOut: o.type==='door' ? false : undefined,
     photos: Object.assign({interior:null, exterior:null}, o.photos),
     photoKeys: Object.assign({interior:null, exterior:null}, o.photoKeys),
+    lastEditedAt: null, // a new id the server has never seen - not o's baseline
     cells: Object.assign({}, baseCells, {label: shortPrefix+o.num+'A', operation:'French Pair', swing: o.type==='door' ? 'Inswing, Left' : ''})
   });
   var passive = Object.assign({}, o, {
@@ -2175,6 +2319,7 @@ function convertToFrenchPair(o){
     swingOut: o.type==='door' ? false : undefined,
     photos: Object.assign({interior:null, exterior:null}, o.photos),
     photoKeys: Object.assign({interior:null, exterior:null}, o.photoKeys),
+    lastEditedAt: null, // a new id the server has never seen - not o's baseline
     cells: Object.assign({}, baseCells, {label: shortPrefix+o.num+'P', operation:'French Pair', swing: o.type==='door' ? 'Inswing, Right' : ''})
   });
 
@@ -2191,7 +2336,7 @@ function nextNumFor(lvl, type){
 function addLabel(x, y){
   var lvl = currentLevel();
   if(!lvl.labels) lvl.labels = [];
-  var lab = { id: nextId(), x: snap(x), y: snap(y), text: 'Room', size: 16 };
+  var lab = { id: nextId(), x: snap(x), y: snap(y), text: 'Room', size: 16, lastEditedAt: null };
   lvl.labels.push(lab);
   return lab;
 }
@@ -2219,6 +2364,7 @@ function addOpening(type, wallKey, along, wallLen){
     noWork: false,
     photos: {interior:null, exterior:null},
     photoKeys: {interior:null, exterior:null},
+    lastEditedAt: null,
     cells: {
       label: shortLabel, type: typeName, operation: operation,
       swing: type==='door' ? 'Inswing, Left' : '',
@@ -2802,7 +2948,7 @@ function onPointerDown(evt){
 
   if(jointMarkerEl){
     if(ui.mode==='addJoint'){
-      if(lvl.locks && lvl.locks.walls){ toast('Walls are locked on this level'); return; }
+      if(wallsEffectivelyLocked(lvl)){ toast('Walls are locked on this level'); return; }
       var res = removeJoint(jointMarkerEl.dataset.vid);
       if(res.ok){ refreshSvg(); scheduleSave(); toast('Joint removed'); }
       else { toast('Push the wall flush before removing this joint'); }
@@ -2825,7 +2971,7 @@ function onPointerDown(evt){
       return;
     }
     if(ui.mode==='addJoint'){
-      if(lvl.locks && lvl.locks.walls){ toast('Walls are locked on this level'); return; }
+      if(wallsEffectivelyLocked(lvl)){ toast('Walls are locked on this level'); return; }
       var t = closestPointParam(e, p)/e.len;
       var res2 = insertJoint(idx, t);
       // Stay in this mode so several joints can be placed in a row, matching windows/doors.
@@ -2842,7 +2988,7 @@ function onPointerDown(evt){
       updateInlinePanel(); refreshSvg();
       return;
     }
-    if(lvl.locks && lvl.locks.walls){ toast('Walls are locked on this level'); return; }
+    if(wallsEffectivelyLocked(lvl)){ toast('Walls are locked on this level'); return; }
     startWallDrag(idx, evt);
   } else {
     ui.selectedOpeningId = null; ui.selectedLabelId = null; ui.selectedInteriorId = null;
@@ -4067,6 +4213,8 @@ function wireUp(){
     state.planId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('p'+Date.now()+Math.random().toString(36).slice(2));
     state.status = 'Draft';
     state.lastEditedAt = null;
+    state.structuralLastEditedAt = null;
+    captureKnownKeysFromState(); // fresh plan, one empty level - nothing known yet either way
     // Don't let the OLD plan's unsynced-streak timestamp bleed into this new one - otherwise
     // the banner could fire based on how long ago the previous plan went stale, not this one.
     lastEditAt = null;
@@ -4160,6 +4308,11 @@ function init(){
     if(!state.planId){
       state.planId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('p'+Date.now()+Math.random().toString(36).slice(2));
     }
+    // Baseline for Phase 2b's per-opening/label conflict detection - whatever loadState() just
+    // restored from local storage (or the fresh default state, if nothing was stored yet) is
+    // "known" as of right now. A cloud load (checkUrlForSharedPlan -> loadCloudPlanIntoState)
+    // recaptures this itself once it resolves, so whichever finishes last is what's used.
+    captureKnownKeysFromState();
     updateTitleField();
     populateLevelSelect();
     refreshSvg();
