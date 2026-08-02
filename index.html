@@ -1777,7 +1777,12 @@ function showConfirmDialog(opts){
   btns.appendChild(cancelBtn); btns.appendChild(okBtn);
   card.appendChild(h3); if(opts.message) card.appendChild(p); card.appendChild(btns);
   ov.appendChild(card);
-  ov.addEventListener('click', function(ev){ if(ev.target===ov) closeDialog(); });
+  // pointerdown (not click) so the SAME tap that dismisses this overlay also lands on whatever's
+  // underneath - e.g. tapping the Move tool while a long-press menu is open used to take two taps
+  // (first just closed the overlay since it was on top and ate the click, second actually hit the
+  // tool button now that the overlay was gone). Removing the overlay on pointerdown lets the
+  // browser's own pointerup/click naturally fall through to the real element in one tap.
+  ov.addEventListener('pointerdown', function(ev){ if(ev.target===ov) closeDialog(); });
   document.body.appendChild(ov);
 }
 
@@ -1804,7 +1809,12 @@ function showPromptDialog(opts){
   btns.appendChild(cancelBtn); btns.appendChild(okBtn);
   card.appendChild(h3); card.appendChild(input); card.appendChild(btns);
   ov.appendChild(card);
-  ov.addEventListener('click', function(ev){ if(ev.target===ov) closeDialog(); });
+  // pointerdown (not click) so the SAME tap that dismisses this overlay also lands on whatever's
+  // underneath - e.g. tapping the Move tool while a long-press menu is open used to take two taps
+  // (first just closed the overlay since it was on top and ate the click, second actually hit the
+  // tool button now that the overlay was gone). Removing the overlay on pointerdown lets the
+  // browser's own pointerup/click naturally fall through to the real element in one tap.
+  ov.addEventListener('pointerdown', function(ev){ if(ev.target===ov) closeDialog(); });
   document.body.appendChild(ov);
   setTimeout(function(){ input.focus(); input.select(); }, 30);
 }
@@ -1896,7 +1906,8 @@ function showIssueLogDialog(openingId){
   card.appendChild(btns);
 
   ov.appendChild(card);
-  ov.addEventListener('click', function(ev){ if(ev.target===ov) closeAndRefreshPanel(); });
+  // pointerdown, not click - see the closeDialog overlay listeners elsewhere for why.
+  ov.addEventListener('pointerdown', function(ev){ if(ev.target===ov) closeAndRefreshPanel(); });
   document.body.appendChild(ov);
   setTimeout(function(){ addInp.focus(); }, 30);
 }
@@ -3890,7 +3901,12 @@ function showFileReadyDialog(blob, filename, mimeType, opts){
   btns.appendChild(downloadBtn); btns.appendChild(shareBtn);
   card.appendChild(h3); card.appendChild(p); card.appendChild(btns);
   ov.appendChild(card);
-  ov.addEventListener('click', function(ev){ if(ev.target===ov) closeDialog(); });
+  // pointerdown (not click) so the SAME tap that dismisses this overlay also lands on whatever's
+  // underneath - e.g. tapping the Move tool while a long-press menu is open used to take two taps
+  // (first just closed the overlay since it was on top and ate the click, second actually hit the
+  // tool button now that the overlay was gone). Removing the overlay on pointerdown lets the
+  // browser's own pointerup/click naturally fall through to the real element in one tap.
+  ov.addEventListener('pointerdown', function(ev){ if(ev.target===ov) closeDialog(); });
   document.body.appendChild(ov);
 }
 
@@ -3939,7 +3955,12 @@ function showMenuDialog(title, items){
   cancelBtn.addEventListener('click', closeDialog);
   card.appendChild(cancelBtn);
   ov.appendChild(card);
-  ov.addEventListener('click', function(ev){ if(ev.target===ov) closeDialog(); });
+  // pointerdown (not click) so the SAME tap that dismisses this overlay also lands on whatever's
+  // underneath - e.g. tapping the Move tool while a long-press menu is open used to take two taps
+  // (first just closed the overlay since it was on top and ate the click, second actually hit the
+  // tool button now that the overlay was gone). Removing the overlay on pointerdown lets the
+  // browser's own pointerup/click naturally fall through to the real element in one tap.
+  ov.addEventListener('pointerdown', function(ev){ if(ev.target===ov) closeDialog(); });
   document.body.appendChild(ov);
 }
 
@@ -4084,7 +4105,12 @@ function showHwrPlansDialog(){
   card.appendChild(cancelBtn);
 
   ov.appendChild(card);
-  ov.addEventListener('click', function(ev){ if(ev.target===ov) closeDialog(); });
+  // pointerdown (not click) so the SAME tap that dismisses this overlay also lands on whatever's
+  // underneath - e.g. tapping the Move tool while a long-press menu is open used to take two taps
+  // (first just closed the overlay since it was on top and ate the click, second actually hit the
+  // tool button now that the overlay was gone). Removing the overlay on pointerdown lets the
+  // browser's own pointerup/click naturally fall through to the real element in one tap.
+  ov.addEventListener('pointerdown', function(ev){ if(ev.target===ov) closeDialog(); });
   document.body.appendChild(ov);
 }
 
@@ -4122,7 +4148,12 @@ function showColumnsDialog(){
   btns.appendChild(doneBtn);
   card.appendChild(btns);
   ov.appendChild(card);
-  ov.addEventListener('click', function(ev){ if(ev.target===ov) closeDialog(); });
+  // pointerdown (not click) so the SAME tap that dismisses this overlay also lands on whatever's
+  // underneath - e.g. tapping the Move tool while a long-press menu is open used to take two taps
+  // (first just closed the overlay since it was on top and ate the click, second actually hit the
+  // tool button now that the overlay was gone). Removing the overlay on pointerdown lets the
+  // browser's own pointerup/click naturally fall through to the real element in one tap.
+  ov.addEventListener('pointerdown', function(ev){ if(ev.target===ov) closeDialog(); });
   document.body.appendChild(ov);
 }
 
@@ -4506,12 +4537,25 @@ function wireUp(){
     btns.appendChild(doneBtn);
     card.appendChild(btns);
     ov.appendChild(card);
-    ov.addEventListener('click', function(ev){ if(ev.target===ov) closeDialog(); });
+    // pointerdown (not click) so the SAME tap that dismisses this overlay also lands on whatever's
+  // underneath - e.g. tapping the Move tool while a long-press menu is open used to take two taps
+  // (first just closed the overlay since it was on top and ate the click, second actually hit the
+  // tool button now that the overlay was gone). Removing the overlay on pointerdown lets the
+  // browser's own pointerup/click naturally fall through to the real element in one tap.
+  ov.addEventListener('pointerdown', function(ev){ if(ev.target===ov) closeDialog(); });
     document.body.appendChild(ov);
   }
 
   document.getElementById('inlinePanelClose').addEventListener('click', function(){
-    ui.selectedOpeningId = null; updateInlinePanel(); refreshSvg();
+    // setMode('move') - not just clearing selectedOpeningId. updateInlinePanel() checks
+    // selectedInteriorId and selectedLabelId before it ever gets to selectedOpeningId, so
+    // clearing only the opening left the panel re-rendering the exact same label/interior-item
+    // detail box instead of actually closing (what Nathan hit while placing labels - same bug
+    // applies to interior lines/rectangles). setMode('move') clears all three AND backs out of
+    // whatever placement tool was active (addLabel/addInteriorLine/addInteriorRect stay "armed"
+    // for placing several in a row otherwise), which is what "close and return to plan view"
+    // actually means - same as tapping the Move tool button.
+    setMode('move');
   });
 
   document.getElementById('optionsMenuBtn').addEventListener('click', function(){

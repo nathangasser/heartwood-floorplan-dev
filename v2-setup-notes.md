@@ -938,6 +938,34 @@ toggle the new Not in Scope checkbox in the schedule and confirm it's in sync wi
 button either direction; try deleting a label and an interior line/rectangle and confirm both now
 ask for confirmation first.
 
+## Round 10m - two more tiny UX bugs - FIXED
+1. Tapping the Move tool right after a long-press tool menu (e.g. Label's long-press to pick
+   Interior Rectangle) closed, needed two taps. Nathan's guess was basically right. Actual
+   mechanism: every dialog/menu overlay in this app closes on tapping the backdrop, and that
+   listener was on the 'click' event - the overlay sits on top of the whole screen including the
+   toolbar, so the first tap's click event only ever reached the overlay (closing it), never the
+   Move button underneath. The second tap then landed on the now-revealed real button. Fixed by
+   switching every overlay's outside-tap-to-close listener (8 of them, all dialogs/menus in the
+   app) from 'click' to 'pointerdown' - removing the overlay that early lets the browser's own
+   natural pointerup/click for that SAME gesture fall through and land on whatever's actually
+   underneath, so one tap now both dismisses the menu and activates the tool in a single motion.
+
+2. The "x" close button on the focus-mode detail panel didn't actually close it while placing a
+   label (and, per Nathan's hunch, the same applied to interior lines/rectangles). Root cause:
+   updateInlinePanel() checks selectedInteriorId and selectedLabelId before it ever gets to
+   selectedOpeningId - the close button was only ever clearing selectedOpeningId, so with a label
+   or interior item selected it just re-rendered the exact same panel right back open. Fixed by
+   having the close button call setMode('move') instead of hand-clearing one field - that's the
+   same function the Move toolbar button itself calls, so it clears all three selection ids,
+   backs out of whatever placement tool was still "armed" (addLabel/addInteriorLine/
+   addInteriorRect otherwise stay active for placing several in a row), and exits focus mode back
+   to plan view, all in one consistent path.
+
+Frontend-only, syntax-checked clean. Worth confirming on a real device: long-press Label (or
+Window) to open its menu, then tap Move once and confirm it activates immediately; place a label,
+interior line, and interior rectangle and confirm the panel's "x" fully closes and returns to
+plan view for all three, not just openings.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).
