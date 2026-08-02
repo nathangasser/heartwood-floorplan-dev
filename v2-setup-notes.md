@@ -966,6 +966,19 @@ Window) to open its menu, then tap Move once and confirm it activates immediatel
 interior line, and interior rectangle and confirm the panel's "x" fully closes and returns to
 plan view for all three, not just openings.
 
+## Round 10n - focus zoom x2, number badge x3 - BUILT
+Two constant tweaks per Nathan's numbers:
+- FOCUS_ZOOM: 1.3 -> 2.6 (doubled). Well under MAX_ZOOM (6), no clamping.
+- Number badge: BADGE_R 15->45, BADGE_FONT 10.5->31.5 (tripled). Also scaled its distance from
+  the wall by the same 3x (20->60px, new BADGE_OFFSET constant) so the bigger circle sits in the
+  same relative spot instead of swallowing the wall/opening - and bumped the text's vertical
+  centering nudge (+4 -> +12) to match the larger font. The separate completed/in-progress/issues
+  status badge on the opposite side was NOT touched - Nathan only asked about the number badge.
+
+Frontend-only, syntax-checked clean. Worth a quick look on a real device: badge at 3x is a big
+jump - confirm it doesn't crowd neighboring windows on a wall with several close together, and
+that focus zoom at 2.6x still leaves enough of the plan visible to get useful context.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).
