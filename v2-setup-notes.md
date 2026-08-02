@@ -999,6 +999,28 @@ Frontend-only, syntax-checked clean. Worth confirming on a real device: drag the
 the plan update live; close and reopen the plan (or reload) and confirm the chosen size persisted;
 export a PDF and confirm it matches the on-screen size.
 
+## Round 10p - French pair leaves share one badge in plan view - BUILT
+Discussed fully unifying French pair leaves into one data object (one schedule row, one id) -
+real complexity: width-splitting, per-leaf swing/hinge, shared vs. per-leaf photos/issues, and a
+migration for existing plans that already have split pairs (some already diverged since today's
+leaves are independently editable). Nathan scoped it down to just the canvas badge instead - much
+smaller change, no data model touched at all.
+
+Both leaves are still fully independent openings everywhere else - two schedule rows, two ids,
+two photo sets, synced independently, no Lambda/migration involved. Only the plan-view badge
+changed: the passive leaf now renders no number badge at all, and the active leaf's badge is
+positioned at the midpoint of the PAIR's combined span (computed from both leaves' offset/width,
+not just its own half) rather than each leaf showing its own badge next to the other. Badge text
+also dropped the A/P suffix - was "W12A"/"W12P", now just "W12", once per pair. Falls back to a
+leaf's own position/text if its sibling can't be found (shouldn't happen in practice).
+
+Verified the center-point math with a standalone calc (active leaf 180-204, passive 204-228 along
+a wall -> badge lands exactly on 204, the shared boundary, as expected) before trusting it.
+Frontend-only, syntax-checked clean. Worth confirming on a real device: an existing French pair
+(you've got a few - D2, D3 on "Lee Nielsen Plan") should now show one "D2"/"D3" badge centered
+between the two leaves instead of two badges side by side; tapping it should still select the
+active leaf same as before.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

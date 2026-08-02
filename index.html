@@ -2222,15 +2222,37 @@ function buildSvg(target, lvl, opts){
     }
 
     var mid2 = {x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2};
+    // French pair leaves share a single number badge (Round 10p) instead of each leaf showing
+    // its own "W12A"/"W12P" - the passive leaf renders no badge at all, and the active leaf's
+    // badge is positioned at the midpoint of the PAIR's combined span, not just its own half, so
+    // it lands centered between the two leaves. Only the badge changes here - both leaves are
+    // still fully independent openings everywhere else (schedule rows, sync, photos, etc.).
+    var badgeMid = mid2, skipBadge = false;
+    if(o.pairId){
+      if(o.pairRole==='passive'){
+        skipBadge = true;
+      } else {
+        var pairSibling = lvl.openings.find(function(x){ return x.pairId===o.pairId && x.id!==o.id; });
+        if(pairSibling && pairSibling.wallKey===o.wallKey){
+          var comboMin = Math.min(o.offset, pairSibling.offset);
+          var comboMax = Math.max(o.offset+o.width, pairSibling.offset+pairSibling.width);
+          var cp1 = pointAt(e, comboMin), cp2 = pointAt(e, comboMax);
+          badgeMid = {x:(cp1.x+cp2.x)/2, y:(cp1.y+cp2.y)/2};
+        }
+        // If the sibling can't be found or ended up on a different wall (shouldn't happen in
+        // normal use), badgeMid just falls back to this leaf's own midpoint - same as before.
+      }
+    }
     // No Work openings show no number badge at all - they're out of scope, so there's nothing
     // to number. The opening itself stays visible and greyed out (typeColor above already
     // handles that); if it's ever added back to scope, the badge comes right back automatically
     // since nothing about its number/id was touched. Still fully tappable via the wall-line hit
     // target below, just no visible circle+text on the canvas.
-    if(!o.noWork){
-      var badgeCenter = {x:mid2.x+badgeNormal.x*BADGE_OFFSET, y:mid2.y+badgeNormal.y*BADGE_OFFSET};
-      var pairSuffix = o.pairRole==='active' ? 'A' : (o.pairRole==='passive' ? 'P' : '');
-      var badgeText = (o.type==='window'?'W':'D') + o.num + pairSuffix;
+    if(!o.noWork && !skipBadge){
+      var badgeCenter = {x:badgeMid.x+badgeNormal.x*BADGE_OFFSET, y:badgeMid.y+badgeNormal.y*BADGE_OFFSET};
+      // No A/P suffix - both leaves of a pair already share the same number, and the badge is
+      // shared now too.
+      var badgeText = (o.type==='window'?'W':'D') + o.num;
       // BADGE_R/BADGE_FONT/BADGE_OFFSET/BADGE_TEXT_NUDGE are hoisted above this loop, driven by
       // state.badgeRadius (Options > Badge Size) - same size for every badge regardless of label
       // content length.
