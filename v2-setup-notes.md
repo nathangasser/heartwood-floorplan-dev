@@ -650,6 +650,30 @@ view can't hide Window Number/Completed/In Progress from Options -> Manage sched
 Next: Batch C, the issue tracker UI itself (glow + comment badge, add-entry log, Resolved with
 confirm).
 
+## Round 10c - rapid-add windows disappearing - FIXED (Nathan's diagnosis was right)
+Nathan noticed: adding windows quickly around a wall, some added after the first would vanish
+shortly after. Correctly guessed it was overlapping syncs and that a sync queue was the fix.
+
+**Confirmed mechanism**: `syncToCloud()` had no protection against firing a second request while
+the first was still in flight - each debounced save just fired its own PUT. `applySyncResult()`
+rebuilds a level's `openings` array from whatever THAT response's `openingsByLevel` says exists,
+filtering out anything not present. If window 2 gets added and synced while window 1's request is
+still in flight, and window 1's response happens to arrive AFTER window 2's (entirely possible -
+plain network jitter, or window 1's request needing a retry per the Round 9f lost-update fix),
+that late-arriving response reflects server state from before window 2 was even sent - and
+applying it wipes window 2 back out of local state, even though the server itself never lost it.
+
+**Fix**: `syncToCloud()` now serializes itself - only one PUT in flight at a time. A save
+triggered while one is already in flight just sets a flag instead of firing an overlapping
+request; the in-flight request's completion (success, conflict, or failure) triggers exactly one
+more sync afterward, picking up everything added since. Every request now always carries the full
+current state, and responses are always processed in the order they were sent, so this class of
+bug can't happen for any field, not just openings - same fix, no separate cases needed.
+
+Frontend-only, no Lambda change. Syntax-checked clean. No new scripted test (this is client-side
+request sequencing, not server merge logic) - worth confirming on a real device: add several
+windows rapidly around a wall and make sure none of them flicker away.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

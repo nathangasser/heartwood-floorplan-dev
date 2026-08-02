@@ -899,6 +899,17 @@ var lastEditAt = null;
 var lastSuccessfulSyncAt = null;
 var unsyncedSinceAt = null; // when the current streak of edits-not-yet-in-the-cloud began
 
+// Serializes syncToCloud() - never more than one PUT in flight at a time. Without this, adding
+// several openings in quick succession (faster than one round trip) could fire overlapping PUTs;
+// applySyncResult() rebuilds a level's openings from whatever a given response says exists, so an
+// EARLIER request's response arriving AFTER a later one - entirely possible with retries/network
+// jitter - reflects server state from before the newer opening was even sent, and would wipe it
+// right back out of local state, even though the server never lost it. Serializing means every
+// request always carries the full current state, and responses are always processed in the order
+// they were sent, so this can't happen.
+var syncInFlight = false;
+var syncQueuedWhileInFlight = false;
+
 function scheduleSave(){
   lastEditAt = Date.now();
   // Mark the start of an unsynced streak the moment it begins, not on some later timer tick -
@@ -1013,6 +1024,14 @@ function collectPhotoKeys(){
 function syncToCloud(){
   if(!isSignedIn()){ setCloudIndicator(''); return; }
   if(!state.planId) return; // shouldn't happen - init()/doStartNew() always assign one
+  if(syncInFlight){
+    // Don't start an overlapping request - just remember there's more to send. The in-flight
+    // request's completion (success, conflict, or failure) triggers exactly one more sync below,
+    // which will pick up everything added/changed since, including this call's edit.
+    syncQueuedWhileInFlight = true;
+    return;
+  }
+  syncInFlight = true;
   var payload = buildCloudPayload();
   var body = {
     jobName: state.title,
@@ -1044,6 +1063,13 @@ function syncToCloud(){
     .catch(function(err){
       console.error('Cloud sync failed', err);
       setCloudIndicator('Not synced');
+    })
+    .then(function(){
+      syncInFlight = false;
+      if(syncQueuedWhileInFlight){
+        syncQueuedWhileInFlight = false;
+        syncToCloud();
+      }
     });
 }
 
