@@ -979,6 +979,26 @@ Frontend-only, syntax-checked clean. Worth a quick look on a real device: badge 
 jump - confirm it doesn't crowd neighboring windows on a wall with several close together, and
 that focus zoom at 2.6x still leaves enough of the plan visible to get useful context.
 
+## Round 10o - badge size now editable (Options > Badge Size) - BUILT
+Round 10n's 3x badges turned out too big. Rather than pick a new fixed number, made it a slider:
+new "Badge Size…" item in Options (both crew and full view - legibility on a phone is exactly a
+crew concern) opens a dialog with a range input from 15px (the original size) to 45px (Round
+10n's 3x). Dragging it live-updates the plan (refreshSvg on input) and saves on release.
+
+Implementation: new state.badgeRadius field (default 25, migrated in applyLoadedState for legacy
+plans that predate this), clamped 15-45 via a shared clampBadgeRadius() helper. It's a whole-plan
+setting synced through the normal data blob (same mechanism as columnVisibility/
+defaultWindowOperation) rather than a per-device preference, so canvas, PDF export, and every
+device agree on one size - all three already share the same buildSvg() code path. Font size,
+distance from the wall, and the text's vertical-centering nudge all derive from this one number
+using the same ratios Nathan already approved at both 15px and 45px (font = radius*0.7, offset =
+radius*4/3, text nudge = font*0.381), so the whole badge stays proportionally consistent at any
+size in between - not just the circle getting bigger with cramped/oversized text.
+
+Frontend-only, syntax-checked clean. Worth confirming on a real device: drag the slider and watch
+the plan update live; close and reopen the plan (or reload) and confirm the chosen size persisted;
+export a PDF and confirm it matches the on-screen size.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

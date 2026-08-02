@@ -360,6 +360,18 @@
 /* ============================== CONSTANTS ============================== */
 var GRID = 10;
 var WALL_T = 10.5; // 75% of the previous 14pt thickness
+
+// Round 10o: number badge size is now user-editable (Options > Badge Size), bounded by the two
+// sizes Nathan actually tried - 15 (the original) and 45 (Round 10n's 3x, which turned out too
+// big). Font size, distance from the wall, and the text's vertical-centering nudge all scale off
+// this one number using the same ratios that already held true at both 15 and 45, so the whole
+// badge stays proportionally consistent at any size in between.
+var BADGE_R_MIN = 15, BADGE_R_MAX = 45;
+function clampBadgeRadius(r){
+  r = Number(r);
+  if(!isFinite(r)) r = 25;
+  return Math.max(BADGE_R_MIN, Math.min(BADGE_R_MAX, r));
+}
 var DEFAULT_OPENING_W = 40; // drawn units == 30 inches, per the crew's standard window width
 var MIN_OPENING_W = 16;
 var SAVE_KEY = 'floorplan-app-v3';
@@ -467,6 +479,7 @@ var state = {
   columnVisibility: defaultColumnVisibility(),
   customColumns: [],
   defaultWindowOperation: 'Double Hung',
+  badgeRadius: 25, // number badge size in px, editable between 15-45 via Options > Badge Size
   // Cloud sync metadata (Phase 2). planId is generated client-side the moment a plan
   // exists (see init()/doStartNew()) so it's stable before the first cloud save ever happens.
   planId: null,
@@ -1682,6 +1695,7 @@ function applyLoadedState(parsed){
   state.title = parsed.title || state.title;
   state.address = parsed.address || '';
   state.defaultWindowOperation = parsed.defaultWindowOperation || 'Double Hung';
+  state.badgeRadius = clampBadgeRadius(parsed.badgeRadius || 25); // legacy plans had no such field
   state.planId = parsed.planId || state.planId || null;
   state.status = parsed.status || state.status || 'Draft';
   state.lastEditedAt = parsed.lastEditedAt || null;
@@ -2125,6 +2139,13 @@ function buildSvg(target, lvl, opts){
   var openG = svgEl('g', {});
   var badgeGroups = [];
   var selectionGroups = [];
+  // Number badge size, editable via Options > Badge Size (15-45px radius) - font size, distance
+  // from the wall, and the text's vertical-centering nudge all scale off it using the same
+  // ratios that held true at both ends Nathan actually tried (15px and 45px).
+  var BADGE_R = clampBadgeRadius(state.badgeRadius);
+  var BADGE_FONT = BADGE_R * 0.7;
+  var BADGE_OFFSET = BADGE_R * (4/3);
+  var BADGE_TEXT_NUDGE = BADGE_FONT * 0.381;
   lvl.openings.forEach(function(o){
     var e = eByKey[o.wallKey];
     if(!e) return;
@@ -2207,20 +2228,15 @@ function buildSvg(target, lvl, opts){
     // since nothing about its number/id was touched. Still fully tappable via the wall-line hit
     // target below, just no visible circle+text on the canvas.
     if(!o.noWork){
-      // Round 10n: badge size tripled (15->45 / 10.5->31.5) per Nathan's request - offset from
-      // the wall scaled by the same 3x factor (20->60) so the bigger circle sits in the same
-      // relative spot instead of swallowing the wall/opening it's labeling.
-      var BADGE_OFFSET = 60;
       var badgeCenter = {x:mid2.x+badgeNormal.x*BADGE_OFFSET, y:mid2.y+badgeNormal.y*BADGE_OFFSET};
       var pairSuffix = o.pairRole==='active' ? 'A' : (o.pairRole==='passive' ? 'P' : '');
       var badgeText = (o.type==='window'?'W':'D') + o.num + pairSuffix;
-      // Sized to comfortably fit the longest possible label (4 chars, e.g. "W22P") without
-      // scaling per-label - keeps every badge the same visual size regardless of content.
-      var BADGE_R = 45, BADGE_FONT = 31.5;
+      // BADGE_R/BADGE_FONT/BADGE_OFFSET/BADGE_TEXT_NUDGE are hoisted above this loop, driven by
+      // state.badgeRadius (Options > Badge Size) - same size for every badge regardless of label
+      // content length.
       var badge = svgEl('g', {'data-role':'opening','data-id':o.id,'data-type':o.type});
       badge.appendChild(svgEl('circle',{cx:badgeCenter.x, cy:badgeCenter.y, r:BADGE_R, fill: typeColor}));
-      // Vertical text-centering nudge scaled with the font (was +4 for a 10.5px font).
-      var txt = svgEl('text',{x:badgeCenter.x, y:badgeCenter.y+12, 'text-anchor':'middle','font-size':BADGE_FONT,'font-weight':800,fill:'#fff'});
+      var txt = svgEl('text',{x:badgeCenter.x, y:badgeCenter.y+BADGE_TEXT_NUDGE, 'text-anchor':'middle','font-size':BADGE_FONT,'font-weight':800,fill:'#fff'});
       txt.textContent = badgeText;
       badge.appendChild(txt);
       badgeGroups.push(badge);
@@ -4162,6 +4178,47 @@ function showColumnsDialog(){
   document.body.appendChild(ov);
 }
 
+// Round 10o: number badge size, editable between 15px (the original) and 45px (Round 10n's 3x,
+// which turned out too big) - see the BADGE_R/BADGE_FONT/BADGE_OFFSET block in buildSvg for how
+// this one number drives everything else about the badge proportionally. Whole-plan setting
+// (synced via state, same as columnVisibility) rather than a per-device preference, so the
+// canvas, schedule jump view, and PDF/print export all agree on one size.
+function showBadgeSizeDialog(){
+  closeDialog();
+  var ov = document.createElement('div'); ov.id='dialogOverlay';
+  var card = document.createElement('div'); card.id='dialogCard';
+  var h3 = document.createElement('h3'); h3.textContent='Badge Size';
+  var p = document.createElement('p'); p.textContent='Size of the window/door number badges on the plan.';
+  card.appendChild(h3); card.appendChild(p);
+
+  var row = document.createElement('div');
+  row.style.cssText = 'display:flex; align-items:center; gap:12px; margin:16px 0;';
+  var slider = document.createElement('input');
+  slider.type='range'; slider.min=String(BADGE_R_MIN); slider.max=String(BADGE_R_MAX); slider.step='1';
+  slider.value = String(clampBadgeRadius(state.badgeRadius));
+  slider.style.flex='1'; slider.style.height='32px';
+  var valLabel = document.createElement('span');
+  valLabel.style.cssText = 'font-weight:800; font-size:15px; min-width:40px; text-align:right;';
+  valLabel.textContent = slider.value + 'px';
+  slider.addEventListener('input', function(){
+    state.badgeRadius = clampBadgeRadius(parseInt(slider.value, 10));
+    valLabel.textContent = state.badgeRadius + 'px';
+    refreshSvg(); // live preview while dragging
+  });
+  slider.addEventListener('change', function(){ scheduleSave(); });
+  row.appendChild(slider); row.appendChild(valLabel);
+  card.appendChild(row);
+
+  var btns = document.createElement('div'); btns.id='dialogButtons'; btns.style.marginTop='10px';
+  var doneBtn = document.createElement('button'); doneBtn.className='dialogOkBtn'; doneBtn.textContent='Done';
+  doneBtn.addEventListener('click', closeDialog);
+  btns.appendChild(doneBtn);
+  card.appendChild(btns);
+  ov.appendChild(card);
+  ov.addEventListener('pointerdown', function(ev){ if(ev.target===ov) closeDialog(); });
+  document.body.appendChild(ov);
+}
+
 function exportPdf(){
   toast('Preparing PDF…');
   ensureJsPdf().then(function(ok){
@@ -4571,6 +4628,7 @@ function wireUp(){
       // stays since it's non-destructive and directly useful for whatever they're working.
       items = [
         { label: 'Manage schedule columns', onClick: showColumnsDialog },
+        { label: 'Badge Size\u2026', onClick: showBadgeSizeDialog },
         { label: 'Switch to Full View', onClick: function(){ setViewMode('full'); toast('Full view'); } }
       ];
     } else {
@@ -4578,6 +4636,7 @@ function wireUp(){
         { label: 'Status: ' + (state.status||'Draft') + '\u2026', onClick: editStatus },
         { label: 'Renumber "'+currentLevel().name+'" clockwise', onClick: renumberClockwise },
         { label: 'Manage schedule columns', onClick: showColumnsDialog },
+        { label: 'Badge Size\u2026', onClick: showBadgeSizeDialog },
         { label: 'Lock "'+currentLevel().name+'"\u2026', onClick: showLockDialog },
         { label: 'Reset "'+currentLevel().name+'"', onClick: resetCurrentLevel, danger: true },
         { label: 'Delete "'+currentLevel().name+'"', onClick: deleteCurrentLevel, danger: true },
