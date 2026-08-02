@@ -1857,9 +1857,10 @@ function svgEl(tag, attrs){
   return el;
 }
 
-// Small checkmark path centered at (cx,cy), sized to fit inside the STATUS_BADGE_R corner badge.
-function checkmarkPathD(cx, cy){
-  var s = 3.4;
+// Checkmark path centered at (cx,cy). s controls size - defaults to fit a small corner badge,
+// pass a larger value for a full-size badge.
+function checkmarkPathD(cx, cy, s){
+  s = s || 3.4;
   return 'M '+(cx-s)+' '+cy+' L '+(cx-s*0.15)+' '+(cy+s*0.85)+' L '+(cx+s*1.05)+' '+(cy-s*0.85);
 }
 
@@ -2144,47 +2145,59 @@ function buildSvg(target, lvl, opts){
     // scaling per-label - keeps every badge the same visual size regardless of content.
     var BADGE_R = 15, BADGE_FONT = 10.5;
     var badge = svgEl('g', {'data-role':'opening','data-id':o.id,'data-type':o.type});
-    var hasIssues = o.issues && o.issues.length > 0;
-    if(hasIssues){
-      // Red/pink glow behind the badge - drawn first so it sits underneath everything else.
-      badge.appendChild(svgEl('circle',{cx:badgeCenter.x, cy:badgeCenter.y, r:BADGE_R+6, fill:'var(--danger)', opacity:0.3}));
-    }
     badge.appendChild(svgEl('circle',{cx:badgeCenter.x, cy:badgeCenter.y, r:BADGE_R, fill: typeColor}));
     var txt = svgEl('text',{x:badgeCenter.x, y:badgeCenter.y+4, 'text-anchor':'middle','font-size':BADGE_FONT,'font-weight':800,fill:'#fff'});
     txt.textContent = badgeText;
     badge.appendChild(txt);
-
-    // Completed / in-progress status overlay - a small corner badge on the opening's number
-    // badge, matching the .tbtnBadge visual language used elsewhere (small pill, white border).
-    // Mutually exclusive by design (checking Completed clears the in-progress percent - see the
-    // schedule/inline-panel checkbox handler), so they share one corner slot, never both at once.
-    var STATUS_BADGE_R = 8;
-    var statusCx = badgeCenter.x + BADGE_R*0.72, statusCy = badgeCenter.y - BADGE_R*0.72;
-    if(o.cells && o.cells.completed){
-      badge.appendChild(svgEl('circle',{cx:statusCx, cy:statusCy, r:STATUS_BADGE_R, fill:'var(--success)', stroke:'#fff','stroke-width':2}));
-      badge.appendChild(svgEl('path',{d:checkmarkPathD(statusCx, statusCy), stroke:'#fff','stroke-width':2, fill:'none','stroke-linecap':'round','stroke-linejoin':'round'}));
-    } else if(o.cells && o.cells.inProgress){
-      badge.appendChild(svgEl('circle',{cx:statusCx, cy:statusCy, r:STATUS_BADGE_R, fill:'var(--accent)', stroke:'#fff','stroke-width':2}));
-      var pctTxt = svgEl('text',{x:statusCx, y:statusCy+2.8, 'text-anchor':'middle','font-size':6.5,'font-weight':800,fill:'#fff'});
-      pctTxt.textContent = String(o.cells.inProgress).replace('%','');
-      badge.appendChild(pctTxt);
-    }
-
-    // Issue log indicator - independent of completion status, so it lives in the opposite
-    // corner from the completed/in-progress badge and can show alongside it. Its own data-role
-    // makes it a distinct tap target (see onPointerDown) that opens the issue log directly,
-    // rather than just selecting the opening.
-    if(hasIssues){
-      var issuesCx = badgeCenter.x - BADGE_R*0.72, issuesCy = badgeCenter.y + BADGE_R*0.72;
-      var issuesBadge = svgEl('g', {'data-role':'issuesBadge', 'data-id':o.id});
-      issuesBadge.appendChild(svgEl('circle',{cx:issuesCx, cy:issuesCy, r:STATUS_BADGE_R, fill:'var(--danger)', stroke:'#fff','stroke-width':2}));
-      [-2.2, 0, 2.2].forEach(function(dx){
-        issuesBadge.appendChild(svgEl('circle',{cx:issuesCx+dx, cy:issuesCy, r:1, fill:'#fff'}));
-      });
-      badge.appendChild(issuesBadge);
-    }
-
     badgeGroups.push(badge);
+
+    // Completed / in-progress / issues indicator - a second, near-full-size badge on the
+    // OPPOSITE side of the opening from the number badge. Originally a tiny corner overlay on
+    // the number badge itself, which turned out unreadably small on a phone - moved here and
+    // enlarged instead. Reuses badgeNormal negated, so it automatically lands opposite wherever
+    // the number badge is (already correctly flipped for doors to sit clear of the swing arc) -
+    // meaning this indicator can end up covering the swing arc instead. Accepted tradeoff:
+    // legibility of the indicator matters more than keeping the arc clear.
+    var hasIssues = o.issues && o.issues.length > 0;
+    var completed = !!(o.cells && o.cells.completed);
+    var inProgressPct = !completed && o.cells && o.cells.inProgress;
+    if(completed || inProgressPct || hasIssues){
+      var statusNormal = {x:-badgeNormal.x, y:-badgeNormal.y};
+      var statusCenter = {x:mid2.x+statusNormal.x*20, y:mid2.y+statusNormal.y*20};
+      var STATUS_R = 14;
+      // Only tappable (to open the issue log) when there's actually a log to open - completed/
+      // in-progress alone are edited via the schedule/inline panel, not by tapping the canvas.
+      var statusAttrs = hasIssues ? {'data-role':'issuesBadge','data-id':o.id} : {};
+      var statusBadge = svgEl('g', statusAttrs);
+      if(hasIssues){
+        // Red/pink glow, drawn first so it sits behind everything else.
+        statusBadge.appendChild(svgEl('circle',{cx:statusCenter.x, cy:statusCenter.y, r:STATUS_R+5, fill:'var(--danger)', opacity:0.3}));
+      }
+      var mainColor = completed ? 'var(--success)' : inProgressPct ? 'var(--accent)' : 'var(--danger)';
+      statusBadge.appendChild(svgEl('circle',{cx:statusCenter.x, cy:statusCenter.y, r:STATUS_R, fill:mainColor, stroke:'#fff','stroke-width':2}));
+      if(completed){
+        statusBadge.appendChild(svgEl('path',{d:checkmarkPathD(statusCenter.x, statusCenter.y, 5.5), stroke:'#fff','stroke-width':2.5, fill:'none','stroke-linecap':'round','stroke-linejoin':'round'}));
+      } else if(inProgressPct){
+        var pctTxt = svgEl('text',{x:statusCenter.x, y:statusCenter.y+3.5, 'text-anchor':'middle','font-size':10,'font-weight':800,fill:'#fff'});
+        pctTxt.textContent = String(inProgressPct).replace('%','');
+        statusBadge.appendChild(pctTxt);
+      } else {
+        // Issues only, nothing else set - the comment dots are the main glyph, not a corner accent.
+        [-3.4, 0, 3.4].forEach(function(dx){
+          statusBadge.appendChild(svgEl('circle',{cx:statusCenter.x+dx, cy:statusCenter.y, r:1.6, fill:'#fff'}));
+        });
+      }
+      // Issues coexisting with completed/in-progress: small corner accent on top of the main
+      // glyph so the issue is still visible even though it's not the primary color/icon.
+      if(hasIssues && (completed || inProgressPct)){
+        var accentCx = statusCenter.x + STATUS_R*0.7, accentCy = statusCenter.y + STATUS_R*0.7;
+        statusBadge.appendChild(svgEl('circle',{cx:accentCx, cy:accentCy, r:6, fill:'var(--danger)', stroke:'#fff','stroke-width':1.5}));
+        [-1.7, 0, 1.7].forEach(function(dx){
+          statusBadge.appendChild(svgEl('circle',{cx:accentCx+dx, cy:accentCy, r:0.8, fill:'#fff'}));
+        });
+      }
+      badgeGroups.push(statusBadge);
+    }
 
     if(o.id === ui.selectedOpeningId && !opts.printMode){
       var selG = svgEl('g', {});

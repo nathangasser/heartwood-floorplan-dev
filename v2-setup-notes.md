@@ -733,6 +733,39 @@ confirm step.
 This closes out the "Opening Status Indicators & Issue Tracking" feature from
 phase2b-conflict-resolution-notes.md (Batches A/B/C all built and, per Nathan, working).
 
+## Round 10f - status/issue indicators enlarged and moved to the opposite side - BUILT
+Nathan confirmed the small corner badges from Batches B/C were too small to read on a phone.
+
+Moved completed/in-progress/issues off the number badge entirely and onto a second, near-full-
+size badge (radius 14, vs. the number badge's 15) on the OPPOSITE side of the opening. Reused
+`badgeNormal` (already correctly flipped for doors to sit clear of the swing arc) negated, so the
+new badge automatically lands on whichever side the number badge *isn't* on - for windows and
+non-operating doors that's the side opposite wherever the wall's outward normal put the number
+badge; for operable doors specifically, it means this indicator can end up sitting over the swing
+arc. Confirmed with Nathan this is an acceptable tradeoff - legibility of the indicator matters
+more than keeping the arc visually clear.
+
+Visual logic on the new badge:
+- Completed -> green circle, white checkmark (same checkmark path helper, now parameterized with
+  a size argument so it can scale up).
+- In Progress (no Completed) -> orange circle, white percent number.
+- Issues with neither of the above -> red circle, three white dots as the main glyph (was
+  previously the only issues glyph, now just bigger).
+- Issues alongside Completed or In Progress -> the primary color/glyph stays, plus a small red
+  corner accent (dot-badge) on the big circle so the issue is still visible without competing with
+  the primary status.
+- Red glow behind the whole badge whenever there are open issues, regardless of what else is set.
+- Only tappable (opens the issue log) when there are actually issues to show - same behavior as
+  before, just relocated. No badge renders at all when none of the three apply.
+
+French Pair openings needed no special handling - each leaf is already rendered as its own
+independent opening with its own wall position/badgeNormal, so each gets its own correctly-placed
+status badge automatically.
+
+Frontend-only, syntax-checked clean. Worth a real-device look, especially: readability at a
+normal zoom level, and a door where the indicator now covers the swing arc - confirm that's
+acceptable in practice, not just in theory.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).
