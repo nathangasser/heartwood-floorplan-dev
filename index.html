@@ -1051,7 +1051,7 @@ function syncToCloud(){
       }
       if(!res.ok) throw new Error('save failed: ' + res.status);
       return res.json().then(function(result){
-        applySyncResult(result);
+        applySyncResult(result, payload.openingsByLevel, payload.labelsByLevel);
         lastStableSnapshot = JSON.stringify(state); // keep the "any unsaved edits?" signal accurate
         lastSuccessfulSyncAt = Date.now();
         unsyncedSinceAt = null; // this is what actually clears the unsynced-work banner
@@ -1079,11 +1079,21 @@ function syncToCloud(){
 // conflict with itself. Anything the server confirms doesn't exist anymore (our own delete
 // landing, or discovered deleted elsewhere) gets removed locally to match.
 //
+// sentOpeningsByLevel/sentLabelsByLevel are exactly what THIS request's own payload contained
+// (captured at request-build time in syncToCloud). Needed to tell "the server confirms this is
+// gone" apart from "this key simply didn't exist yet when this request was built" - syncToCloud
+// serializes requests (only one in flight at a time), but a request can still take a while to
+// round-trip, during which more local edits happen. Without this distinction, an opening added
+// locally AFTER this request was already sent would look "not present" in this response and get
+// filtered out here, even though the server never lost anything - it was simply never asked about
+// it yet, and the next queued sync would have picked it up. This is what was still causing
+// windows to flicker away when adding several in quick succession (Round 10d).
+//
 // Interim conflict handling: this applies whichever version the server kept (the other side's,
 // per Decision 3 - true conflicts never silently overwrite) and toasts that it happened, so nothing
 // is lost without at least being surfaced. This is a placeholder for the scoped "keep mine / keep
 // theirs" one-at-a-time dialog planned next (Phase 2b) - not the final experience.
-function applySyncResult(result){
+function applySyncResult(result, sentOpeningsByLevel, sentLabelsByLevel){
   var item = result.item;
   state.lastEditedAt = item.lastEditedAt;
   state.structuralLastEditedAt = item.structuralLastEditedAt;
@@ -1092,21 +1102,30 @@ function applySyncResult(result){
 
   state.levels.forEach(function(lvl){
     var oMap = (item.openingsByLevel && item.openingsByLevel[lvl.id]) || {};
+    var sentO = (sentOpeningsByLevel && sentOpeningsByLevel[lvl.id]) || {};
     lvl.openings = (lvl.openings||[]).filter(function(o){
       var merged = oMap[o.id];
-      if(!merged || merged.__deleted) return false; // confirmed gone
-      var localPhotos = o.photos; // never sent/returned by the server - preserve it locally
-      Object.assign(o, merged);
-      o.photos = localPhotos;
-      return true;
+      if(merged && !merged.__deleted){
+        var localPhotos = o.photos; // never sent/returned by the server - preserve it locally
+        Object.assign(o, merged);
+        o.photos = localPhotos;
+        return true;
+      }
+      // Not confirmed present in this response. Only actually remove it locally if this
+      // request's own payload knew about it - otherwise leave it alone, it's newer than this
+      // response and a later sync will pick it up.
+      return !(o.id in sentO);
     });
 
     var lMap = (item.labelsByLevel && item.labelsByLevel[lvl.id]) || {};
+    var sentL = (sentLabelsByLevel && sentLabelsByLevel[lvl.id]) || {};
     lvl.labels = (lvl.labels||[]).filter(function(l){
       var merged = lMap[l.id];
-      if(!merged || merged.__deleted) return false;
-      Object.assign(l, merged);
-      return true;
+      if(merged && !merged.__deleted){
+        Object.assign(l, merged);
+        return true;
+      }
+      return !(l.id in sentL);
     });
   });
 

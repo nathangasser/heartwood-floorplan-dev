@@ -674,6 +674,35 @@ Frontend-only, no Lambda change. Syntax-checked clean. No new scripted test (thi
 request sequencing, not server merge logic) - worth confirming on a real device: add several
 windows rapidly around a wall and make sure none of them flicker away.
 
+## Round 10d - rapid-add windows still flickering after Round 10c - FIXED (the real gap)
+Round 10c's serialization (never two requests in flight at once) helped but didn't fully fix it -
+Nathan still saw it happen at a steady fast pace ("about the beat of Another One Bites the Dust",
+~110-120bpm, so roughly one add every ~500-550ms - right at the edge of the 500ms debounce).
+
+**The actual remaining gap**: serializing requests prevents *overlapping* ones, but a single
+request can still take a few hundred ms to round-trip. If a window gets added locally WHILE an
+earlier request is already in flight (easily possible even one-at-a-time, just from normal
+network latency), that in-flight request's payload was built before the new window existed, so it
+has no idea about it. `applySyncResult()` was rebuilding each level's array from "whatever this
+response says exists" and discarding anything else - so when that in-flight response arrived and
+got applied, the window added in the meantime looked "not present" and got filtered straight back
+out of local state, even though it was never sent to the server yet, let alone rejected by it.
+Round 10c's fix only closed the door on overlapping requests; it didn't change what happens when a
+single request's response arrives after newer local edits have already happened, which is the
+much more common case at any real editing speed.
+
+**Fix**: `applySyncResult()` now takes the exact `openingsByLevel`/`labelsByLevel` that request's
+own payload contained (captured at request-build time). An opening only gets removed from local
+state if it was part of THAT SPECIFIC request's payload and the response confirms it's gone
+(deleted or missing). Anything not part of that request's payload - i.e. added locally after the
+request was already built - is left alone regardless of what the response says, since the
+response simply never had an opinion on it. The next sync (already correctly queued/serialized
+per Round 10c) picks it up normally.
+
+Frontend-only, no Lambda change, single call site updated (`syncToCloud()`'s success handler).
+Syntax-checked clean. Worth retesting at the same pace as before - should hold up now regardless
+of add speed, since this closes the actual gap rather than just reducing how often it's hit.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).
