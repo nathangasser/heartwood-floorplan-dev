@@ -39,7 +39,11 @@
     padding:5px 7px; border-radius:8px;
   }
   #title:focus{outline:2px solid var(--accent); background:var(--panel); white-space:normal; overflow:visible; text-overflow:clip;}
-  #saveIndicator{font-size:11px; font-weight:700; color:var(--muted); flex:0 0 auto; min-width:44px; text-align:right;}
+  #cloudIndicator{
+    font-size:11px; font-weight:700; color:var(--muted); flex:0 0 auto; text-align:right;
+    cursor:pointer; padding:8px 4px; margin:-8px -4px; border-radius:8px; /* padding+negative margin: bigger tap target on mobile without shifting layout */
+  }
+  #cloudIndicator:active{background:var(--panel);}
   #undoBtn{
     flex:0 0 auto; font-size:12px; font-weight:800; color:var(--accent-ink); background:var(--accent);
     border:2px solid var(--accent); border-radius:8px; padding:5px 9px;
@@ -275,8 +279,7 @@
   <header>
     <div id="titleRow">
       <div id="title" contenteditable="true" spellcheck="false">Untitled Floor Plan</div>
-      <div id="saveIndicator">Saved</div>
-      <div id="cloudIndicator" style="font-size:11px; font-weight:700; color:var(--muted);"></div>
+      <div id="cloudIndicator" title="Tap to sync now"></div>
       <button id="undoBtn" disabled title="Undo last action">&#8630; Undo</button>
     </div>
     <div id="levelBar">
@@ -4161,6 +4164,16 @@ function wireUp(){
   });
 
   document.getElementById('unsyncedBanner').addEventListener('click', function(){
+    if(isSignedIn()) syncToCloud();
+    else requireSignInDialog('Sign in to sync your changes to the cloud.');
+  });
+
+  // The small sync status next to the title is now the primary at-a-glance signal (the local
+  // "Saved" indicator was retired - it only reflected local browser storage, which isn't
+  // something anyone needs to actively watch now that cloud sync is what actually matters).
+  // Tapping it forces a sync attempt right now, instead of waiting on the 5-minute background
+  // check or the 10-minute unsynced banner.
+  document.getElementById('cloudIndicator').addEventListener('click', function(){
     if(isSignedIn()) syncToCloud();
     else requireSignInDialog('Sign in to sync your changes to the cloud.');
   });
