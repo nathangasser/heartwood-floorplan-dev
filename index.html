@@ -1597,6 +1597,7 @@ function migrateOpeningToV3(o){
   if(!o.photos) o.photos = {interior:null, exterior:null};
   if(!o.photoKeys) o.photoKeys = {interior:null, exterior:null};
   if(o.lastEditedAt===undefined) o.lastEditedAt = null; // Phase 2b per-opening conflict baseline
+  if(!Array.isArray(o.issues)) o.issues = []; // Opening Status Indicators & Issue Tracking
   if(o.cells && typeof o.cells.inProgress === 'boolean'){
     // inProgress moved from a checkbox to a 25/50/75/90% dropdown - a boolean doesn't map to any
     // specific percent, so clear it rather than guess; the crew can set a real value next time
@@ -1754,6 +1755,98 @@ function showPromptDialog(opts){
   ov.addEventListener('click', function(ev){ if(ev.target===ov) closeDialog(); });
   document.body.appendChild(ov);
   setTimeout(function(){ input.focus(); input.select(); }, 30);
+}
+
+// Per-opening issue log - Opening Status Indicators & Issue Tracking. Entries are
+// {time, user, message}, append-only from the UI's point of view (the "Resolved" action clears
+// the whole array in one go, individual entries are never edited or removed one at a time).
+// Union-merge semantics for concurrent additions to the same opening live in the Lambda
+// (Round 10a) - nothing special needed here, this just appends locally and syncs normally.
+function showIssueLogDialog(openingId){
+  var lvl = currentLevel();
+  var o = lvl.openings.find(function(x){ return x.id===openingId; });
+  if(!o) return;
+  if(!Array.isArray(o.issues)) o.issues = [];
+  closeDialog();
+  var ov = document.createElement('div'); ov.id='dialogOverlay';
+  var card = document.createElement('div'); card.id='dialogCard';
+  card.style.maxHeight='80vh'; card.style.overflowY='auto';
+  var shortDefault = (o.type==='window'?'W':'D')+o.num+(o.pairRole==='active'?'A':o.pairRole==='passive'?'P':'');
+  var h3 = document.createElement('h3'); h3.textContent = 'Issues — ' + ((o.cells && o.cells.label) || shortDefault);
+  card.appendChild(h3);
+
+  if(o.issues.length===0){
+    var empty = document.createElement('p');
+    empty.style.fontSize='13px'; empty.style.color='var(--muted)';
+    empty.textContent = 'No issues logged.';
+    card.appendChild(empty);
+  } else {
+    // Newest first, so a fresh note doesn't require scrolling to find.
+    o.issues.slice().sort(function(a,b){ return (b.time||'').localeCompare(a.time||''); }).forEach(function(entry){
+      var row = document.createElement('div');
+      row.style.padding='8px 0'; row.style.borderBottom='1px solid var(--line)';
+      var meta = document.createElement('div');
+      meta.style.fontSize='11px'; meta.style.fontWeight='700'; meta.style.color='var(--muted)';
+      meta.textContent = (entry.user||'Unknown') + ' · ' + (entry.time ? new Date(entry.time).toLocaleString() : '');
+      var msg = document.createElement('div');
+      msg.style.fontSize='14px'; msg.style.marginTop='2px'; msg.style.wordBreak='break-word';
+      msg.textContent = entry.message;
+      row.appendChild(meta); row.appendChild(msg);
+      card.appendChild(row);
+    });
+  }
+
+  var addRow = document.createElement('div'); addRow.style.marginTop='12px';
+  var addInp = document.createElement('input');
+  addInp.type='text'; addInp.placeholder='Describe the issue…'; addInp.style.width='100%';
+  addRow.appendChild(addInp);
+  var addBtn = document.createElement('button');
+  addBtn.type='button'; addBtn.className='ipActionBtn'; addBtn.style.width='100%'; addBtn.style.marginTop='8px';
+  addBtn.textContent = 'Add';
+  function submitAdd(){
+    var msg = addInp.value.trim();
+    if(!msg) return;
+    o.issues.push({ time: new Date().toISOString(), user: currentUserEmail || 'Unknown', message: msg });
+    refreshSvg(); buildScheduleIfActive(); scheduleSave();
+    showIssueLogDialog(openingId); // rebuild in place so the new entry shows immediately
+  }
+  addBtn.addEventListener('click', submitAdd);
+  addInp.addEventListener('keydown', function(ev){ if(ev.key==='Enter') submitAdd(); });
+  addRow.appendChild(addBtn);
+  card.appendChild(addRow);
+
+  var btns = document.createElement('div'); btns.id='dialogButtons'; btns.style.marginTop='14px';
+  if(o.issues.length){
+    var resolveBtn = document.createElement('button');
+    resolveBtn.type='button'; resolveBtn.className='dialogOkBtn dialogDangerBtn';
+    resolveBtn.textContent = 'Resolved (clear all)';
+    resolveBtn.addEventListener('click', function(){
+      var count = o.issues.length;
+      showConfirmDialog({
+        title: 'Clear all issues?',
+        message: 'This removes all '+count+' logged issue'+(count===1?'':'s')+' for this opening. This can’t be undone.',
+        okLabel: 'Clear', danger: true,
+        onConfirm: function(){
+          o.issues = [];
+          refreshSvg(); updateInlinePanel(); buildScheduleIfActive(); scheduleSave();
+          toast('Issues cleared');
+        }
+      });
+    });
+    btns.appendChild(resolveBtn);
+  }
+  function closeAndRefreshPanel(){ closeDialog(); updateInlinePanel(); }
+  var closeBtn = document.createElement('button');
+  closeBtn.type='button'; closeBtn.className='dialogCancelBtn';
+  closeBtn.textContent = 'Close';
+  closeBtn.addEventListener('click', closeAndRefreshPanel);
+  btns.appendChild(closeBtn);
+  card.appendChild(btns);
+
+  ov.appendChild(card);
+  ov.addEventListener('click', function(ev){ if(ev.target===ov) closeAndRefreshPanel(); });
+  document.body.appendChild(ov);
+  setTimeout(function(){ addInp.focus(); }, 30);
 }
 
 /* ============================== SVG BUILD ============================== */
@@ -2051,6 +2144,11 @@ function buildSvg(target, lvl, opts){
     // scaling per-label - keeps every badge the same visual size regardless of content.
     var BADGE_R = 15, BADGE_FONT = 10.5;
     var badge = svgEl('g', {'data-role':'opening','data-id':o.id,'data-type':o.type});
+    var hasIssues = o.issues && o.issues.length > 0;
+    if(hasIssues){
+      // Red/pink glow behind the badge - drawn first so it sits underneath everything else.
+      badge.appendChild(svgEl('circle',{cx:badgeCenter.x, cy:badgeCenter.y, r:BADGE_R+6, fill:'var(--danger)', opacity:0.3}));
+    }
     badge.appendChild(svgEl('circle',{cx:badgeCenter.x, cy:badgeCenter.y, r:BADGE_R, fill: typeColor}));
     var txt = svgEl('text',{x:badgeCenter.x, y:badgeCenter.y+4, 'text-anchor':'middle','font-size':BADGE_FONT,'font-weight':800,fill:'#fff'});
     txt.textContent = badgeText;
@@ -2070,6 +2168,20 @@ function buildSvg(target, lvl, opts){
       var pctTxt = svgEl('text',{x:statusCx, y:statusCy+2.8, 'text-anchor':'middle','font-size':6.5,'font-weight':800,fill:'#fff'});
       pctTxt.textContent = String(o.cells.inProgress).replace('%','');
       badge.appendChild(pctTxt);
+    }
+
+    // Issue log indicator - independent of completion status, so it lives in the opposite
+    // corner from the completed/in-progress badge and can show alongside it. Its own data-role
+    // makes it a distinct tap target (see onPointerDown) that opens the issue log directly,
+    // rather than just selecting the opening.
+    if(hasIssues){
+      var issuesCx = badgeCenter.x - BADGE_R*0.72, issuesCy = badgeCenter.y + BADGE_R*0.72;
+      var issuesBadge = svgEl('g', {'data-role':'issuesBadge', 'data-id':o.id});
+      issuesBadge.appendChild(svgEl('circle',{cx:issuesCx, cy:issuesCy, r:STATUS_BADGE_R, fill:'var(--danger)', stroke:'#fff','stroke-width':2}));
+      [-2.2, 0, 2.2].forEach(function(dx){
+        issuesBadge.appendChild(svgEl('circle',{cx:issuesCx+dx, cy:issuesCy, r:1, fill:'#fff'}));
+      });
+      badge.appendChild(issuesBadge);
     }
 
     badgeGroups.push(badge);
@@ -2414,6 +2526,7 @@ function convertToFrenchPair(o){
     photos: Object.assign({interior:null, exterior:null}, o.photos),
     photoKeys: Object.assign({interior:null, exterior:null}, o.photoKeys),
     lastEditedAt: null, // a new id the server has never seen - not o's baseline
+    issues: [], // new id, new physical opening (of a pair) - doesn't inherit the original's issue log
     cells: Object.assign({}, baseCells, {label: shortPrefix+o.num+'A', operation:'French Pair', swing: o.type==='door' ? 'Inswing, Left' : ''})
   });
   var passive = Object.assign({}, o, {
@@ -2425,6 +2538,7 @@ function convertToFrenchPair(o){
     photos: Object.assign({interior:null, exterior:null}, o.photos),
     photoKeys: Object.assign({interior:null, exterior:null}, o.photoKeys),
     lastEditedAt: null, // a new id the server has never seen - not o's baseline
+    issues: [], // new id, new physical opening (of a pair) - doesn't inherit the original's issue log
     cells: Object.assign({}, baseCells, {label: shortPrefix+o.num+'P', operation:'French Pair', swing: o.type==='door' ? 'Inswing, Right' : ''})
   });
 
@@ -2470,6 +2584,7 @@ function addOpening(type, wallKey, along, wallLen){
     photos: {interior:null, exterior:null},
     photoKeys: {interior:null, exterior:null},
     lastEditedAt: null,
+    issues: [],
     cells: {
       label: shortLabel, type: typeName, operation: operation,
       swing: type==='door' ? 'Inswing, Left' : '',
@@ -2760,6 +2875,17 @@ function updateInlinePanel(){
     body.appendChild(swapRow);
   }
 
+  var issuesRow = document.createElement('div'); issuesRow.className='ipRow';
+  var issuesLab = document.createElement('label'); issuesLab.textContent = 'Issues'; issuesRow.appendChild(issuesLab);
+  var issuesBtn = document.createElement('button');
+  issuesBtn.type='button'; issuesBtn.style.width='100%';
+  var issueCount = (o.issues||[]).length;
+  issuesBtn.className = 'ipActionBtn' + (issueCount ? ' ipDangerBtn' : '');
+  issuesBtn.textContent = issueCount ? ('⚠ ' + issueCount + ' open issue' + (issueCount===1?'':'s')) : 'No issues – add one';
+  issuesBtn.addEventListener('click', function(){ showIssueLogDialog(o.id); });
+  issuesRow.appendChild(issuesBtn);
+  body.appendChild(issuesRow);
+
   allColumnsForDisplay().forEach(function(col){
     var showSwingForWindow = col.key==='swing' && o.type==='window' && o.operation==='Casement';
     var showSwingForDoor = col.key==='swing' && o.type==='door';
@@ -3012,13 +3138,26 @@ function onPointerDown(evt){
 
   var target = evt.target;
   var handleEl = target.closest('[data-role="handle"]');
-  var openingEl = !handleEl ? target.closest('[data-role="opening"]') : null;
-  var labelEl = (!handleEl && !openingEl) ? target.closest('[data-role="label"]') : null;
-  var interiorEl = (!handleEl && !openingEl && !labelEl) ? target.closest('[data-role="interior"]') : null;
-  var jointMarkerEl = (!handleEl && !openingEl && !labelEl && !interiorEl) ? target.closest('[data-role="jointMarker"]') : null;
-  var wallEl = (!handleEl && !openingEl && !labelEl && !interiorEl && !jointMarkerEl) ? target.closest('[data-role="wall"]') : null;
+  // Checked ahead of the opening itself - it's nested inside the opening's badge group, so it'd
+  // otherwise also match [data-role="opening"] via closest() walking up to the parent.
+  var issuesBadgeEl = !handleEl ? target.closest('[data-role="issuesBadge"]') : null;
+  var openingEl = (!handleEl && !issuesBadgeEl) ? target.closest('[data-role="opening"]') : null;
+  var labelEl = (!handleEl && !issuesBadgeEl && !openingEl) ? target.closest('[data-role="label"]') : null;
+  var interiorEl = (!handleEl && !issuesBadgeEl && !openingEl && !labelEl) ? target.closest('[data-role="interior"]') : null;
+  var jointMarkerEl = (!handleEl && !issuesBadgeEl && !openingEl && !labelEl && !interiorEl) ? target.closest('[data-role="jointMarker"]') : null;
+  var wallEl = (!handleEl && !issuesBadgeEl && !openingEl && !labelEl && !interiorEl && !jointMarkerEl) ? target.closest('[data-role="wall"]') : null;
 
   if(handleEl){ startHandleDrag(handleEl.dataset.id, handleEl.dataset.end); return; }
+
+  if(issuesBadgeEl){
+    // Also selects the opening (like tapping the badge itself would) so the inline panel is
+    // showing the right opening once the dialog closes.
+    ui.selectedLabelId = null;
+    ui.selectedOpeningId = issuesBadgeEl.dataset.id;
+    refreshSvg();
+    showIssueLogDialog(issuesBadgeEl.dataset.id);
+    return;
+  }
 
   if(openingEl){
     if(ui.mode!=='move'){ return; }

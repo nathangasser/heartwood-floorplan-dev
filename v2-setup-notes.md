@@ -703,6 +703,36 @@ Frontend-only, no Lambda change, single call site updated (`syncToCloud()`'s suc
 Syntax-checked clean. Worth retesting at the same pace as before - should hold up now regardless
 of add speed, since this closes the actual gap rather than just reducing how often it's hit.
 
+## Round 10e - Opening Status Indicators: Batch C (issue tracker UI) - BUILT
+Frontend-only, no Lambda change (Batch A's union-merge from earlier already handles the sync side).
+
+- New `o.issues` array (`{time, user, message}` entries), defaulted to `[]` on creation
+  (`addOpening`) and on migration (`migrateOpeningToV3`, for plans saved before this). French Pair
+  conversions start both new openings with an empty log rather than inheriting the original's -
+  ambiguous which of the two should get it, and they're new ids anyway.
+- **Canvas indicator**: red/pink glow behind the opening's number badge, plus a small red corner
+  badge (three white dots, chat-bubble style) in the opposite corner from the completed/in-progress
+  badge, so both can show at once - independent of completion status, per the design doc. The
+  corner badge is its own tap target (`data-role="issuesBadge"`, checked ahead of the opening
+  itself in `onPointerDown` since it's nested inside the opening's badge group) - tapping it
+  selects the opening and opens the issue log directly, rather than just selecting.
+- **Issue log dialog** (`showIssueLogDialog`): entries listed newest-first with who/when, a text
+  input + Add button, and (only shown when there's at least one issue) a "Resolved (clear all)"
+  button gated behind a danger-styled confirm dialog matching the existing reset-level/delete-level
+  pattern. Closing re-syncs the inline panel so its issue count stays accurate.
+- **Inline panel entry point**: a new "Issues" row (added since the canvas badge can be a small
+  target to hit precisely, especially zoomed out) - shows the open count and opens the same dialog,
+  styled as a plain button when empty ("No issues – add one") or a danger-styled button with the
+  count when not.
+
+Syntax-checked clean. No new scripted tests (pure UI, the merge semantics were already verified in
+Batch A). Worth a real-device pass: add an issue from the canvas badge and from the inline panel,
+confirm the glow/badge appears and disappears correctly, and that Resolved actually requires the
+confirm step.
+
+This closes out the "Opening Status Indicators & Issue Tracking" feature from
+phase2b-conflict-resolution-notes.md (Batches A/B/C all built and, per Nathan, working).
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).
