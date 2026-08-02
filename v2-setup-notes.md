@@ -544,6 +544,112 @@ checks) - all passing. Both files syntax-clean.
 fresh on both phones - should NOT see the dialog immediately anymore. Then repeat the
 different-opening-edit test from Round 9d's retest recipe.
 
+## Round 9f - real data-loss bug: concurrent saves could silently erase each other - FIXED
+Nathan's retest of Round 9e (dialog-on-load bug fixed, confirmed) surfaced a genuinely different,
+more serious bug: phone 1 added a door, phone 2 edited a note on a different window at roughly
+the same time - no dialog either time - but the door was never merely *not shown* on phone 2, it
+was actually gone from the database. Refreshing, waiting 5+ minutes, switching tabs - nothing
+brought it back. Only opening a different plan and returning (a full reload) recovered it, which
+was the tell that this wasn't a display/refresh problem.
+
+**Root cause**: `savePlan` was a plain read-merge-write - GetCommand the current record, compute
+the merged item in memory, PutCommand the whole thing back. That's a classic lost-update race.
+The per-opening merge only knows about whatever THIS request's own GetCommand happened to see. If
+phone 1's read landed before phone 2's write completed, phone 1's own PutCommand still carries
+forward its own now-stale copy of the *entire* openingsByLevel map - including phone 2's window,
+which phone 1 never touched and still has the old content for. From phone 1's point of view
+nothing about that key changed, so it gets carried forward unchanged into the write - silently
+overwriting whatever phone 2 had just added, including keys phone 1 never even looked at (the
+door). Nothing in the merge logic itself was wrong - the problem was two independent writers each
+trusting their own snapshot as ground truth for a full-map replacement.
+
+**Fix**: optimistic concurrency on the write itself, not just on the structural field.
+`savePlan` now retries against a fresh read whenever the write's `ConditionExpression` (item's
+`lastEditedAt` must still match what this request read) fails - i.e. whenever another save landed
+in between. Refactored into a `savePlanWithStore(store, ...)` that takes a storage abstraction
+(get + conditional put), so the retry loop itself is unit-testable against an in-memory fake
+without a real DynamoDB table. No new IAM permissions needed - conditional writes use the same
+PutItem action as before.
+
+**Verified**: added a scripted race to `test-conflict-scenarios.mjs` that reproduces this exact
+scenario deterministically (phone 2's full save runs to completion in the middle of phone 1's
+read-then-write window) - confirms both the door and the note survive. 32 assertions total, all
+passing. Both files syntax-clean.
+
+**Needs deploy + retest**: `index.mjs` only this round (no frontend change). Retest recipe: same
+as before - two phones, each edits a different opening at close to the same time, no dialog
+expected either way, and now BOTH edits should show up on BOTH phones without needing a full plan
+reload to recover.
+
+## Round 10a - Opening Status Indicators & Issue Tracking: Batch A (Lambda) - BUILT, deploy needed
+First of three batches for the feature described in phase2b-conflict-resolution-notes.md's
+"Opening Status Indicators & Issue Tracking" section. This batch is backend-only: gives the
+per-opening merge logic the special-case behavior `issues` needs before any frontend UI is built
+on top of it.
+
+`issues` (per-opening issue log entries: {time, user, message}) needs union-by-content semantics,
+not last-write-wins - two crew members each adding a note to the same window in the same sync
+window must both survive, not just whichever save lands last. `mergeKeyedMap` now carves this out:
+`issues` always unions (deduped by time+user+message) regardless of what else happens with that
+key, while every other field on the opening keeps the exact same last-write-wins/conflict behavior
+as before - including when there's a genuine conflict on some other field at the same time, the
+issues union still goes through untouched by that conflict. `openingContentEqual` gained an
+optional extraExclude param so `issues` can be left out of the "is this key actually changing"
+check without touching its existing behavior for every other caller. Labels don't have `issues` -
+fully backward compatible no-op for them.
+
+**Verified**: two new scenarios in `test-conflict-scenarios.mjs` (two devices each adding a
+different note to the same opening - merges silently, no conflict; issues unioning even alongside
+a genuine conflict on a different field of the same opening) plus direct `unionIssues` checks -
+43 assertions total, all passing. Syntax-clean.
+
+**Needs deploy**: `index.mjs` only, no frontend changes yet - nothing in the app actually writes
+to `o.issues` until Batch C builds the UI for it, so this is safe to deploy standalone with zero
+visible change in the meantime.
+
+**Also queued for Batch B** (per Nathan): in crew view, "Window Number", "Completed", and "In
+Progress" columns should always show and not be optional to hide - `state.columnVisibility` is a
+shared/synced setting, so a manager hiding one of these for full view would otherwise also hide it
+from crew. Plan: `visiblePresetColumns()` forces these three visible whenever
+`ui.viewMode==='crew'` without mutating `state.columnVisibility` itself (stays fully optional in
+full view, as today), and `showColumnsDialog()` shows them as locked/non-interactive rows in crew
+view instead of removing them from the list.
+
+## Round 10b - Opening Status Indicators: Batch B (frontend visuals + crew locked columns) - BUILT
+Frontend-only, no Lambda change. `index.mjs` from Batch A already deployed, no further backend
+work needed for this piece.
+
+- **Completed checkmark**: no schema change needed - `completed` was already a checkbox column.
+  Added a small corner badge (green circle + checkmark) on the opening's number badge on the plan
+  canvas when checked, matching the existing `.tbtnBadge` small-pill visual language.
+- **In Progress**: converted from a checkbox to a dropdown (`kind:'checkbox'` -> `kind:'dropdown'`
+  with a blank/25%/50%/75%/90% option list) - this reused the schedule's existing generic dropdown
+  rendering everywhere (schedule table, inline panel, PDF/CSV/print export all already branch on
+  `col.kind` generically, nothing hardcoded the old checkbox assumption). Renders as a small
+  number overlay in the same corner slot the checkmark uses - the two are mutually exclusive by
+  design, so they never compete for space. Migration: any opening with an old boolean `inProgress`
+  value gets it cleared to blank on load (a boolean can't map to a specific percent - the crew
+  re-picks a real value next time they touch that opening).
+- **Mutual exclusivity**: checking Completed clears the In Progress percent (both the schedule
+  table's and inline panel's checkbox handlers now special-case `col.key==='completed'`). Not
+  built the other direction (picking a percent doesn't uncheck Completed) - wasn't asked for and
+  the checkmark-clears-percent direction is the one that actually matters for avoiding a
+  contradictory-looking icon.
+- **Crew-mode locked columns** (added to this batch per Nathan): "Window Number", "Completed", and
+  "In Progress" now always show in crew view regardless of the shared `columnVisibility` setting -
+  `visiblePresetColumns()` forces them visible when `ui.viewMode==='crew'` without mutating the
+  underlying preference, so full view stays exactly as optional as before. `showColumnsDialog()`
+  shows these three as checked-and-disabled rows (with a small "(always shown in crew view)" note)
+  instead of removing them from the list entirely, so it's clear why they can't be unchecked.
+
+Syntax-checked clean. No new scripted tests this round (pure UI rendering + a data-shape
+migration, not merge logic) - worth a real-device pass: check a window's checkmark/percent badge
+appears on the plan canvas, toggling Completed clears an existing In Progress %, and that crew
+view can't hide Window Number/Completed/In Progress from Options -> Manage schedule columns.
+
+Next: Batch C, the issue tracker UI itself (glow + comment badge, add-entry log, Resolved with
+confirm).
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

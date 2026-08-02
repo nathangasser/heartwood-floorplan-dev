@@ -18,6 +18,7 @@
     --panel:#f6f4ee;
     --muted:#4b5058;
     --danger:#c62828;
+    --success:#1e8e3e;
   }
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
   html,body{height:100%; margin:0; overflow:hidden; overscroll-behavior:none;}
@@ -385,6 +386,9 @@ var CASEMENT_SWING_OPTIONS = [
   {value:'in', label:'Inswing'},
   {value:'out', label:'Outswing'}
 ];
+// Blank = not in progress. A plain dropdown (not a slider/number input) so it stays a fast single
+// tap on a phone, matching every other schedule field's interaction style.
+var IN_PROGRESS_OPTIONS = ['', '25%', '50%', '75%', '90%'];
 
 // Preset schedule columns. kind: 'text' | 'dropdown' | 'swing' (door-only special control) | 'locked'.
 // optionsFor(type) lets a column offer different choices for windows vs doors (e.g. Operation).
@@ -393,7 +397,8 @@ function presetColumnDefs(){
     {key:'label', label:'Window Number', kind:'text', maxLength:26, defaultVisible:true},
     {key:'type', label:'Type', kind:'locked', defaultVisible:true},
     {key:'completed', label:'Completed', kind:'checkbox', defaultVisible:true},
-    {key:'inProgress', label:'In Progress', pdfLabel:'In Prog.', kind:'checkbox', defaultVisible:true},
+    {key:'inProgress', label:'In Progress', pdfLabel:'In Prog.', kind:'dropdown', defaultVisible:true,
+      optionsFor:function(){ return IN_PROGRESS_OPTIONS; }},
     {key:'operation', label:'Operation', kind:'dropdown', defaultVisible:true,
       optionsFor:function(type){ return type==='window' ? WINDOW_OPERATIONS : DOOR_OPERATIONS; }},
     {key:'swing', label:'Swing', kind:'swing', appliesTo:'door', defaultVisible:true},
@@ -419,9 +424,16 @@ function defaultColumnVisibility(){
 // EITHER opening type present, e.g. Swing only shows if there's at least one door somewhere -
 // simplified here to "always show if visible", per-row logic decides whether a cell applies)
 // plus any custom columns the crew has added on top.
+// In crew view, these three are always shown regardless of the shared columnVisibility setting -
+// they're the core of the day-to-day "mark complete, flag an issue" workflow. columnVisibility
+// itself is a shared/synced setting though, so it stays fully optional in full view as before;
+// this only forces the effective display, never mutates the underlying preference.
+var CREW_ALWAYS_VISIBLE_KEYS = ['label','completed','inProgress'];
 function visiblePresetColumns(){
   var vis = state.columnVisibility || defaultColumnVisibility();
-  return presetColumnDefs().filter(function(c){ return !!vis[c.key]; });
+  return presetColumnDefs().filter(function(c){
+    return !!vis[c.key] || (ui.viewMode==='crew' && CREW_ALWAYS_VISIBLE_KEYS.indexOf(c.key)!==-1);
+  });
 }
 function allColumnsForDisplay(){
   return visiblePresetColumns().concat(state.customColumns || []);
@@ -1540,6 +1552,12 @@ function migrateOpeningToV3(o){
   if(!o.photos) o.photos = {interior:null, exterior:null};
   if(!o.photoKeys) o.photoKeys = {interior:null, exterior:null};
   if(o.lastEditedAt===undefined) o.lastEditedAt = null; // Phase 2b per-opening conflict baseline
+  if(o.cells && typeof o.cells.inProgress === 'boolean'){
+    // inProgress moved from a checkbox to a 25/50/75/90% dropdown - a boolean doesn't map to any
+    // specific percent, so clear it rather than guess; the crew can set a real value next time
+    // they touch this opening.
+    o.cells.inProgress = '';
+  }
   if(o.operation !== undefined) return o; // already current format
   if(o.type==='window'){
     var map = {fixed:'Fixed', doubleHung:'Double Hung', casement:'Casement'};
@@ -1699,6 +1717,12 @@ function svgEl(tag, attrs){
   var el = document.createElementNS(svgNS, tag);
   for(var k in attrs){ el.setAttribute(k, attrs[k]); }
   return el;
+}
+
+// Small checkmark path centered at (cx,cy), sized to fit inside the STATUS_BADGE_R corner badge.
+function checkmarkPathD(cx, cy){
+  var s = 3.4;
+  return 'M '+(cx-s)+' '+cy+' L '+(cx-s*0.15)+' '+(cy+s*0.85)+' L '+(cx+s*1.05)+' '+(cy-s*0.85);
 }
 
 var viewState = { zoom: 1, vx: null, vy: null }; // vx/vy null = not yet manually positioned (auto-fit)
@@ -1986,6 +2010,23 @@ function buildSvg(target, lvl, opts){
     var txt = svgEl('text',{x:badgeCenter.x, y:badgeCenter.y+4, 'text-anchor':'middle','font-size':BADGE_FONT,'font-weight':800,fill:'#fff'});
     txt.textContent = badgeText;
     badge.appendChild(txt);
+
+    // Completed / in-progress status overlay - a small corner badge on the opening's number
+    // badge, matching the .tbtnBadge visual language used elsewhere (small pill, white border).
+    // Mutually exclusive by design (checking Completed clears the in-progress percent - see the
+    // schedule/inline-panel checkbox handler), so they share one corner slot, never both at once.
+    var STATUS_BADGE_R = 8;
+    var statusCx = badgeCenter.x + BADGE_R*0.72, statusCy = badgeCenter.y - BADGE_R*0.72;
+    if(o.cells && o.cells.completed){
+      badge.appendChild(svgEl('circle',{cx:statusCx, cy:statusCy, r:STATUS_BADGE_R, fill:'var(--success)', stroke:'#fff','stroke-width':2}));
+      badge.appendChild(svgEl('path',{d:checkmarkPathD(statusCx, statusCy), stroke:'#fff','stroke-width':2, fill:'none','stroke-linecap':'round','stroke-linejoin':'round'}));
+    } else if(o.cells && o.cells.inProgress){
+      badge.appendChild(svgEl('circle',{cx:statusCx, cy:statusCy, r:STATUS_BADGE_R, fill:'var(--accent)', stroke:'#fff','stroke-width':2}));
+      var pctTxt = svgEl('text',{x:statusCx, y:statusCy+2.8, 'text-anchor':'middle','font-size':6.5,'font-weight':800,fill:'#fff'});
+      pctTxt.textContent = String(o.cells.inProgress).replace('%','');
+      badge.appendChild(pctTxt);
+    }
+
     badgeGroups.push(badge);
 
     if(o.id === ui.selectedOpeningId && !opts.printMode){
@@ -2168,7 +2209,9 @@ function buildSchedule(){
           chk.addEventListener('change', function(){
             if(!o.cells) o.cells = {};
             o.cells[col.key] = chk.checked;
-            scheduleSave();
+            // Completed and In Progress % are mutually exclusive - never shown stacked.
+            if(col.key==='completed' && chk.checked) o.cells.inProgress = '';
+            refreshSvg(); buildScheduleIfActive(); scheduleSave();
           });
           td.style.textAlign = 'center';
           td.appendChild(chk);
@@ -2772,7 +2815,9 @@ function updateInlinePanel(){
       chk2.addEventListener('change', function(){
         if(!o.cells) o.cells = {};
         o.cells[col.key] = chk2.checked;
-        buildScheduleIfActive(); scheduleSave();
+        // Completed and In Progress % are mutually exclusive - never shown stacked.
+        if(col.key==='completed' && chk2.checked) o.cells.inProgress = '';
+        refreshSvg(); updateInlinePanel(); buildScheduleIfActive(); scheduleSave();
       });
       row.appendChild(chk2);
     } else {
@@ -3719,18 +3764,22 @@ function showColumnsDialog(){
   var p = document.createElement('p'); p.textContent='Choose which columns to show. Columns you add yourself always show.';
   card.appendChild(h3); card.appendChild(p);
   presetColumnDefs().forEach(function(col){
+    var lockedInCrew = ui.viewMode==='crew' && CREW_ALWAYS_VISIBLE_KEYS.indexOf(col.key)!==-1;
     var row = document.createElement('label');
     row.style.display='flex'; row.style.alignItems='center'; row.style.gap='10px';
     row.style.padding='9px 0'; row.style.fontSize='14px'; row.style.fontWeight='700';
+    if(lockedInCrew) row.style.opacity='0.6';
     var cb = document.createElement('input'); cb.type='checkbox';
-    cb.checked = !!state.columnVisibility[col.key];
+    cb.checked = lockedInCrew || !!state.columnVisibility[col.key];
+    cb.disabled = lockedInCrew;
     cb.style.width='20px'; cb.style.height='20px'; cb.style.flex='0 0 auto';
     cb.addEventListener('change', function(){
       state.columnVisibility[col.key] = cb.checked;
       buildSchedule(); updateInlinePanel(); scheduleSave();
     });
     row.appendChild(cb);
-    var span = document.createElement('span'); span.textContent = col.label;
+    var span = document.createElement('span');
+    span.textContent = col.label + (lockedInCrew ? ' (always shown in crew view)' : '');
     row.appendChild(span);
     card.appendChild(row);
   });
