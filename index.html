@@ -119,7 +119,12 @@
 
   /* ---------- Inline editor panel ---------- */
   #inlinePanel{
-    flex:0 0 auto; display:none; flex-direction:column; max-height:34vh;
+    /* Round 10q: grown from 34vh - Nathan doesn't need much floorplan visible while in focus
+       mode. The zoomed-in anchor is already set to the exact center of its viewBox on both axes,
+       and the SVG's default preserveAspectRatio (xMidYMid meet, unchanged) always renders that
+       center at the exact center of whatever box #planSvg occupies - so the selected item should
+       still land centered in the smaller remaining canvas strip with no extra math needed. */
+    flex:0 0 auto; display:none; flex-direction:column; max-height:55vh;
     border-top:2px solid var(--ink); background:var(--paper);
     padding-bottom:calc(0px + env(safe-area-inset-bottom));
   }
@@ -146,6 +151,18 @@
   .ipActionBtn{flex:1; border:2px solid var(--ink); border-radius:10px; padding:11px; font-weight:800; font-size:14px; background:var(--paper); color:var(--ink);}
   .ipActionBtn.active{background:var(--muted); border-color:var(--muted); color:#fff;}
   .ipDangerBtn{background:var(--danger); color:#fff; border-color:var(--danger);}
+
+  /* Round 10q: pulsing "beacon" ring around flagged-issue badges, replacing the old static
+     glow - a hollow ring that grows outward and fades, repeating. Duration here (1.6s) must
+     match PULSE_MS in the script, which computes each ring's animation-delay from the current
+     clock so every flagged opening's ring stays in phase and so a ring rebuilt mid-cycle (the
+     whole SVG gets rebuilt on most interactions) resumes correctly instead of restarting. */
+  @keyframes issuePulse{
+    0%{ transform:scale(1); opacity:0.65; }
+    70%{ transform:scale(2.1); opacity:0; }
+    100%{ transform:scale(2.1); opacity:0; }
+  }
+  .issuePulseRing{ animation:issuePulse 1.6s ease-out infinite; pointer-events:none; }
 
   /* ---------- Schedule view ---------- */
   #scheduleWrap{flex:1 1 auto; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch;}
@@ -366,6 +383,7 @@ var WALL_T = 10.5; // 75% of the previous 14pt thickness
 // big). Font size, distance from the wall, and the text's vertical-centering nudge all scale off
 // this one number using the same ratios that already held true at both 15 and 45, so the whole
 // badge stays proportionally consistent at any size in between.
+var PULSE_MS = 1600; // must match the issuePulse @keyframes duration in the <style> block
 var BADGE_R_MIN = 15, BADGE_R_MAX = 45;
 function clampBadgeRadius(r){
   r = Number(r);
@@ -2283,8 +2301,21 @@ function buildSvg(target, lvl, opts){
       var statusAttrs = hasIssues ? {'data-role':'issuesBadge','data-id':o.id} : {};
       var statusBadge = svgEl('g', statusAttrs);
       if(hasIssues){
-        // Red/pink glow, drawn first so it sits behind everything else.
-        statusBadge.appendChild(svgEl('circle',{cx:statusCenter.x, cy:statusCenter.y, r:STATUS_R+5, fill:'var(--danger)', opacity:0.3}));
+        // Pulsing radiating ring (Round 10q), drawn first so it sits behind everything else -
+        // replaces the old static glow. PULSE_MS-based animation-delay (not 0) is deliberate: the
+        // whole SVG gets rebuilt from scratch on basically every interaction (refreshSvg), and a
+        // plain animation restarts from 0% every time that happens, which would look frozen/
+        // stuttery mid-edit. Keying the delay off the current wall-clock time instead means a
+        // freshly rebuilt ring always resumes exactly where it should be in the cycle - and since
+        // every flagged opening computes its delay from that same clock, they all stay in phase
+        // with each other for free, no coordination needed.
+        var pulseDelay = -(Date.now() % PULSE_MS);
+        statusBadge.appendChild(svgEl('circle',{
+          cx:statusCenter.x, cy:statusCenter.y, r:STATUS_R,
+          fill:'none', stroke:'var(--danger)', 'stroke-width':2.5,
+          'class':'issuePulseRing',
+          style:'transform-origin:'+statusCenter.x+'px '+statusCenter.y+'px; animation-delay:'+pulseDelay+'ms;'
+        }));
       }
       var mainColor = completed ? 'var(--success)' : inProgressPct ? 'var(--accent)' : 'var(--danger)';
       statusBadge.appendChild(svgEl('circle',{cx:statusCenter.x, cy:statusCenter.y, r:STATUS_R, fill:mainColor, stroke:'#fff','stroke-width':2}));
@@ -3450,7 +3481,47 @@ function onPointerDown(evt){
   } else {
     ui.selectedOpeningId = null; ui.selectedLabelId = null; ui.selectedInteriorId = null;
     updateInlinePanel(); refreshSvg();
+    // Genuinely empty background (nothing matched any of the data-role checks above) - one
+    // finger/mouse-drag pans the view. See startBackgroundPan for why this is safe now: every
+    // interactive thing on the canvas already has its own generous hit target checked ahead of
+    // this fallback, so reaching here means there's really nothing else to grab.
+    startBackgroundPan(evt);
   }
+}
+
+// One-finger (or mouse) drag-to-pan on empty canvas. Only reachable from onPointerDown's final
+// background fallback, after every opening/wall/label/interior/joint/handle hit-test has already
+// missed - so this never fights with any of those for the gesture.
+function startBackgroundPan(evt){
+  var svg = document.getElementById('planSvg');
+  var rect = svg.getBoundingClientRect();
+  if(!rect.width || !rect.height) return;
+  var vb = computeViewBox(currentLevel(), false);
+  // Fixed for the whole gesture - viewBox-units-per-screen-pixel at the zoom this drag started
+  // at (same technique the edge-auto-pan code already uses). Deliberately using CLIENT-space
+  // deltas here, not svgPoint()-converted deltas re-derived each frame: the CTM changes as
+  // viewState.vx/vy get updated below, so diffing successive svgPoint() conversions against a
+  // fixed start would double-count each frame's own pan into the next frame's delta and run
+  // away. Physical screen-pixel deltas don't have that problem - they're independent of the
+  // viewBox entirely.
+  var scaleX = vb.vw/rect.width, scaleY = vb.vh/rect.height;
+  var startClientX = evt.clientX, startClientY = evt.clientY;
+  var startVx = vb.vx, startVy = vb.vy;
+  viewState.zoom = clampZoom(viewState.zoom); // ensure a real, positioned view before nudging vx/vy
+
+  function onMove(ev){
+    viewState.vx = startVx - (ev.clientX-startClientX)*scaleX;
+    viewState.vy = startVy - (ev.clientY-startClientY)*scaleY;
+    refreshSvg();
+  }
+  function onUp(){
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    activeDragCleanup = null;
+  }
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  activeDragCleanup = onUp;
 }
 
 function startWallDrag(edgeIndex, evt){

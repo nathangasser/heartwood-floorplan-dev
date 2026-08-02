@@ -1021,6 +1021,48 @@ Frontend-only, syntax-checked clean. Worth confirming on a real device: an exist
 between the two leaves instead of two badges side by side; tapping it should still select the
 active leaf same as before.
 
+## Round 10q - three feature requests - BUILT
+Discussed complexity first (see prior discussion), built in easiest-to-hardest order:
+
+1. **Pulsing issue ring.** Replaced the static glow behind flagged-issue badges with a hollow
+   ring that scales outward and fades, repeating - CSS @keyframes, not JS-driven. The one thing
+   worth doing right: the whole SVG rebuilds from scratch on nearly every interaction, and a plain
+   animation restarts from 0% every rebuild, which would look frozen/stuttery mid-edit. Fixed by
+   giving each ring an animation-delay computed from the current wall-clock time (Date.now() %
+   PULSE_MS) rather than 0 - a freshly rebuilt ring resumes exactly where it should be, and since
+   every flagged opening computes off the same clock, they all stay in phase automatically with no
+   coordination code needed. Only the main hasIssues-only glow was replaced - the smaller corner
+   accent (issues coexisting with completed/in-progress) stays a static dot, unchanged.
+
+2. **One-finger/mouse pan-drag on empty canvas.** Turned out easier than Nathan expected - hit-
+   testing already excludes openings/walls/labels/interior items/joints/handles via a priority-
+   ordered chain of data-role checks in onPointerDown, and there was already an unused fallback
+   for "nothing matched" (previously just cleared selection). Added startBackgroundPan() there,
+   reusing the same viewBox-units-per-screen-pixel technique the existing edge-auto-pan code
+   already uses. Important subtlety: deltas are computed from CLIENT-space (physical screen
+   pixel) differences against a FIXED gesture-start reference, not from svgPoint()-converted
+   differences re-derived every frame - the latter would double-count each frame's own pan into
+   the next frame's delta (since the CTM changes as viewState.vx/vy update) and run away. Wires
+   into the existing 2-finger-interrupts-1-finger-drag system for free via activeDragCleanup, same
+   as every other drag. No-op at zoom 1 (computeViewBox ignores vx/vy until actually zoomed in),
+   so it's safe to attach unconditionally.
+
+3. **Bigger focus panel.** Nathan pushed back on his own request mid-discussion - questioned
+   whether the "still centered" part needed special handling or would just happen. Talked through
+   the SVG math again: the zoomed-in anchor is already set to the exact center of its viewBox on
+   both axes, and preserveAspectRatio's default (xMidYMid meet, unchanged) always renders that
+   center at the exact center of whatever box the SVG element occupies, regardless of aspect
+   ratio - so centering should already be free. Went with just the CSS change (34vh -> 55vh) and
+   held off on any container-aware zoom-math rework pending a real-device look, per that
+   discussion - if letterboxing turns out to make the content look smaller than it should within
+   the strip, that's the follow-up to revisit, not a positioning bug.
+
+Frontend-only, syntax-checked clean. Worth confirming on a real device: flag an issue on two
+different windows and confirm both rings pulse in sync; drag on empty background with one finger
+(and with a mouse) and confirm the plan pans smoothly without ever grabbing something it shouldn't;
+select something in focus mode and confirm it's still centered in the now-smaller visible canvas
+strip, and that dragging a window near that strip's edge still auto-pans sensibly.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).
