@@ -817,6 +817,40 @@ view, so both delete entry points now behave consistently.
 Frontend-only, syntax-checked clean. Worth confirming on a real device: crew view shows neither
 delete button anywhere for openings, full view still has both (now both behind a confirm).
 
+## Round 10i - landing chooser instead of silent blank plan - BUILT (frontend only)
+Root cause of abandoned/untitled plan clutter: on any fresh device/browser storage (first-ever
+load, cleared site data, private browsing, Safari purging IndexedDB after inactivity - all things
+that happen a lot during two-phone testing), init() had no local plan to restore, so it just fell
+through to the default blank state (title "Untitled Floor Plan") and immediately assigned it a
+real planId. From that point it's a live plan - the next autosave silently creates a permanent
+DynamoDB record, with no prompt or name required.
+
+Note: the explicit File > New... flow already required a name (promptNewPlanName/
+startNewPlanFlow, built earlier) - that part didn't need building. The gap was specifically the
+silent landing path.
+
+Fix:
+- loadState(cb) now reports whether it actually found and restored a saved plan (cb(foundLocal)),
+  instead of always calling cb() with no signal either way.
+- checkUrlForSharedPlan() sets a new sharedPlanRequested flag whenever the URL had ?plan= at all
+  (whether it resolved immediately or is pending sign-in) - keeps the new landing chooser from
+  double-firing on top of an intentional shared-link open.
+- New showLandingChooser(): if signed in, opens the existing HWR Plans dialog (already has search
+  + "+ New Plan", which already requires a name); if not signed in yet, sets pendingLandingChooser
+  and waits - handleGoogleCredential retries it after sign-in completes, same pattern already used
+  for a pending shared-link plan.
+- init()'s loadState callback calls showLandingChooser() when !foundLocal && !sharedPlanRequested.
+
+Low-risk by design: the blank state still renders underneath (nothing about init() otherwise
+changed), and nothing autosaves to the cloud until the user actually edits something - so even if
+someone dismisses/closes the picker without choosing, they're no worse off than before (lands on
+a blank draft, same as today), they just get the choice surfaced instead of it happening silently.
+
+Frontend-only, syntax-checked clean. Worth confirming on a real device: clear site data (or use
+a private window) and reload - should land on the HWR Plans picker instead of a blank plan;
+signing in from a cold start should also trigger the picker right after sign-in completes; a
+shared link (?plan=...) should still go straight to that plan with no picker in the way.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

@@ -1440,6 +1440,10 @@ function wallsEffectivelyLocked(lvl){
 }
 
 var pendingSharedPlanId = null;
+// True whenever the URL had a ?plan= param at all, whether it resolved immediately (signed in
+// already) or is pending sign-in - guards the fresh-load landing chooser (see showLandingChooser)
+// from popping up on top of an intentional shared-link open.
+var sharedPlanRequested = false;
 
 // Reads ?plan=<id> off the URL (how a shared link opens a specific plan) and cleans it from
 // the address bar so a refresh doesn't keep re-triggering it. If not signed in yet, the id is
@@ -1448,6 +1452,7 @@ function checkUrlForSharedPlan(){
   var params = new URLSearchParams(location.search);
   var planId = params.get('plan');
   if(!planId) return;
+  sharedPlanRequested = true;
   if(window.history && history.replaceState) history.replaceState({}, '', location.pathname);
   if(isSignedIn()){
     openPlanById(planId);
@@ -1455,6 +1460,18 @@ function checkUrlForSharedPlan(){
     pendingSharedPlanId = planId;
     requireSignInDialog('Sign in to open this shared plan.');
   }
+}
+
+// Fresh device/browser storage with nothing saved yet (loadState found no local plan), and this
+// isn't a shared link landing on a specific plan - instead of silently handing the visitor a
+// blank "Untitled Floor Plan" that becomes a permanent, easy-to-forget cloud record the moment
+// they touch anything, surface the same HWR Plans picker (existing plan search, or "+ New Plan"
+// which already requires a name) as the very first thing they see. If sign-in hasn't resolved
+// yet, wait for it - same retry pattern as a shared link (see handleGoogleCredential).
+var pendingLandingChooser = false;
+function showLandingChooser(){
+  if(isSignedIn()){ showHwrPlansDialog(); }
+  else { pendingLandingChooser = true; }
 }
 
 // Puts a link to the current plan on the clipboard (or the OS share sheet on mobile) so it
@@ -1538,6 +1555,9 @@ function handleGoogleCredential(response){
   if(pendingSharedPlanId){
     var pid = pendingSharedPlanId; pendingSharedPlanId = null;
     openPlanById(pid);
+  } else if(pendingLandingChooser){
+    pendingLandingChooser = false;
+    showHwrPlansDialog();
   } else {
     syncToCloud(); // catch up any edits made before sign-in completed
   }
@@ -1620,15 +1640,20 @@ function setSaveIndicator(text){
   var el = document.getElementById('saveIndicator');
   if(el) el.textContent = text;
 }
+// cb(foundLocal) - foundLocal is true only if a previously-saved plan was actually restored.
+// Used by init() to tell "returning to a plan already in progress" apart from "brand new device/
+// browser storage, nothing here yet" - the latter is what triggers the landing chooser instead of
+// silently handing the visitor a blank Untitled Floor Plan.
 function loadState(cb){
   try{
     persistGet(SAVE_KEY).then(function(res){
+      var found = false;
       if(res && res.value){
-        try{ applyLoadedState(JSON.parse(res.value)); }catch(e){}
+        try{ applyLoadedState(JSON.parse(res.value)); found = true; }catch(e){}
       }
-      cb();
-    }).catch(function(){ cb(); });
-  }catch(e){ cb(); }
+      cb(found);
+    }).catch(function(){ cb(false); });
+  }catch(e){ cb(false); }
 }
 function migrateOpeningToV3(o){
   if(!o.photos) o.photos = {interior:null, exterior:null};
@@ -4641,7 +4666,7 @@ function init(){
   // Read synchronously, before any async GIS sign-in callback can fire, so a shared link's
   // ?plan= id is captured in time even if the visitor isn't signed in yet.
   checkUrlForSharedPlan();
-  loadState(function(){
+  loadState(function(foundLocal){
     // Every plan needs a stable cloud identity from the moment it exists, even a fresh
     // blank one nobody has saved yet - guarantees the first cloud sync creates exactly
     // one record instead of leaving planId null.
@@ -4663,6 +4688,10 @@ function init(){
     if(window.updateWindowDefaultBadge) window.updateWindowDefaultBadge();
     startPeriodicRefreshCheck();
     startUnsyncedBannerTimer();
+    // Brand new device/browser storage (nothing to restore) and not in the middle of opening a
+    // specific shared link - surface the plan picker instead of silently leaving this blank
+    // Untitled Floor Plan as the working state. See showLandingChooser() above.
+    if(!foundLocal && !sharedPlanRequested) showLandingChooser();
   });
 }
 
