@@ -909,6 +909,35 @@ openings on it down toward its hard-stop and confirm they compress from the corr
 re-run the original repro (drag any wall, confirm nothing on OTHER walls moves, and now also
 confirm the two walls that ARE adjacent to the drag behave sensibly instead of jumping).
 
+## Round 10l - four small tweaks - BUILT
+1. Service Level (and Glass) dropdowns defaulted to LOOKING like "Rerope"/first-in-list even
+   though the stored cell value was still '' - a native <select> with no matching <option> falls
+   back to displaying option 0, so it visually looked chosen while exporting blank to PDF. Nathan's
+   diagnosis was right. Fixed generically in both dropdown renderers (schedule table + inline
+   panel): if the current value isn't found among the real options, a genuine blank option is
+   inserted and selected instead of letting the browser guess. Only affects columns that can
+   legitimately start unset (Service Level, Glass) - Operation/In Progress already always have a
+   real matching value/blank option, so no visible change there.
+2. No Work openings no longer show a number badge on the canvas at all - just the greyed-out
+   opening shape, no circle+number. If resumed later ("Resume Work"), the badge reappears exactly
+   as it was (nothing about the underlying id/number was touched, purely a render-time skip).
+3. New fixed "Not in Scope" column added as the last real data column in the Window Schedule,
+   right before the "+" add-column button - not part of the preset/custom column system (always
+   present, not hideable/reorderable). It's a direct checkbox on o.noWork: checking it is the same
+   as tapping "No Work" in focus mode, unchecking it is the same as "Resume Work" - both paths flip
+   the identical flag, so they always agree.
+4. Added the same delete-confirmation treatment from Round 10g (openings) to the two other focus-
+   mode delete buttons that didn't have it yet: "Delete this label" and "Delete this
+   rectangle/line". Same danger-styled showConfirmDialog + toast pattern throughout now - all
+   three delete entry points in focus mode behave identically.
+
+Frontend-only, syntax-checked clean. Worth confirming on a real device: pick Service Level/Glass
+on a fresh window and confirm it now starts genuinely blank (not looking pre-filled); mark a window
+No Work and confirm its badge disappears from the canvas immediately, reappears on Resume Work;
+toggle the new Not in Scope checkbox in the schedule and confirm it's in sync with the focus-mode
+button either direction; try deleting a label and an interior line/rectangle and confirm both now
+ask for confirmation first.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

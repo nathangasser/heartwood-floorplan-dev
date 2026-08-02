@@ -2190,18 +2190,25 @@ function buildSvg(target, lvl, opts){
     }
 
     var mid2 = {x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2};
-    var badgeCenter = {x:mid2.x+badgeNormal.x*20, y:mid2.y+badgeNormal.y*20};
-    var pairSuffix = o.pairRole==='active' ? 'A' : (o.pairRole==='passive' ? 'P' : '');
-    var badgeText = (o.type==='window'?'W':'D') + o.num + pairSuffix;
-    // Sized to comfortably fit the longest possible label (4 chars, e.g. "W22P") without
-    // scaling per-label - keeps every badge the same visual size regardless of content.
-    var BADGE_R = 15, BADGE_FONT = 10.5;
-    var badge = svgEl('g', {'data-role':'opening','data-id':o.id,'data-type':o.type});
-    badge.appendChild(svgEl('circle',{cx:badgeCenter.x, cy:badgeCenter.y, r:BADGE_R, fill: typeColor}));
-    var txt = svgEl('text',{x:badgeCenter.x, y:badgeCenter.y+4, 'text-anchor':'middle','font-size':BADGE_FONT,'font-weight':800,fill:'#fff'});
-    txt.textContent = badgeText;
-    badge.appendChild(txt);
-    badgeGroups.push(badge);
+    // No Work openings show no number badge at all - they're out of scope, so there's nothing
+    // to number. The opening itself stays visible and greyed out (typeColor above already
+    // handles that); if it's ever added back to scope, the badge comes right back automatically
+    // since nothing about its number/id was touched. Still fully tappable via the wall-line hit
+    // target below, just no visible circle+text on the canvas.
+    if(!o.noWork){
+      var badgeCenter = {x:mid2.x+badgeNormal.x*20, y:mid2.y+badgeNormal.y*20};
+      var pairSuffix = o.pairRole==='active' ? 'A' : (o.pairRole==='passive' ? 'P' : '');
+      var badgeText = (o.type==='window'?'W':'D') + o.num + pairSuffix;
+      // Sized to comfortably fit the longest possible label (4 chars, e.g. "W22P") without
+      // scaling per-label - keeps every badge the same visual size regardless of content.
+      var BADGE_R = 15, BADGE_FONT = 10.5;
+      var badge = svgEl('g', {'data-role':'opening','data-id':o.id,'data-type':o.type});
+      badge.appendChild(svgEl('circle',{cx:badgeCenter.x, cy:badgeCenter.y, r:BADGE_R, fill: typeColor}));
+      var txt = svgEl('text',{x:badgeCenter.x, y:badgeCenter.y+4, 'text-anchor':'middle','font-size':BADGE_FONT,'font-weight':800,fill:'#fff'});
+      txt.textContent = badgeText;
+      badge.appendChild(txt);
+      badgeGroups.push(badge);
+    }
 
     // Completed / in-progress / issues indicator - a second, near-full-size badge on the
     // OPPOSITE side of the opening from the number badge. Originally a tiny corner overlay on
@@ -2348,6 +2355,12 @@ function buildSchedule(){
   htr.appendChild(photosTh);
   var jumpTh = document.createElement('th'); jumpTh.style.width='52px';
   htr.appendChild(jumpTh);
+  // Fixed final data column, not part of the preset/custom column system - always present,
+  // never hideable/reorderable. This is the one place "not in scope" gets set/cleared from the
+  // schedule; unchecking it here is exactly the same action as tapping "Resume Work" in focus
+  // mode (see the inline panel's noWorkBtn), since both just flip the same o.noWork flag.
+  var scopeTh = document.createElement('th'); scopeTh.textContent='Not in Scope'; scopeTh.style.width='70px';
+  htr.appendChild(scopeTh);
   var addColTh = document.createElement('th'); addColTh.style.width='46px';
   var addColBtn = document.createElement('button');
   addColBtn.type='button'; addColBtn.className='addColHeaderBtn'; addColBtn.textContent='+';
@@ -2375,7 +2388,7 @@ function buildSchedule(){
       var htr2 = document.createElement('tr');
       htr2.className='levelHeaderRow';
       var td2 = document.createElement('td');
-      td2.colSpan = cols.length+3;
+      td2.colSpan = cols.length+4;
       td2.textContent = lvl.name;
       htr2.appendChild(td2);
       tbody.appendChild(htr2);
@@ -2442,10 +2455,20 @@ function buildSchedule(){
           var sel = document.createElement('select');
           sel.disabled = locked;
           var isOtherFlag = o.cells && o.cells[col.key+'IsOther'];
+          var currentVal = isOtherFlag ? 'Other' : (o.cells && o.cells[col.key]);
+          // Nothing chosen yet - show a real blank option instead of letting the browser fall
+          // back to displaying option 0 (e.g. "Rerope") for a value with no match in the list.
+          // That mismatch was exactly why an untouched Service Level column looked like it had a
+          // real choice on screen but exported blank to PDF - the underlying cell was still ''.
+          if(options.indexOf(currentVal) === -1){
+            var blankEl = document.createElement('option');
+            blankEl.value=''; blankEl.textContent=''; blankEl.selected = true;
+            sel.appendChild(blankEl);
+          }
           options.forEach(function(optText){
             var oEl = document.createElement('option');
             oEl.value = optText; oEl.textContent = optText;
-            if(isOtherFlag ? optText==='Other' : (o.cells && o.cells[col.key]===optText)) oEl.selected = true;
+            if(currentVal===optText) oEl.selected = true;
             sel.appendChild(oEl);
           });
           sel.addEventListener('change', function(){
@@ -2546,6 +2569,20 @@ function buildSchedule(){
         jumpTd.appendChild(delBtn);
       }
       tr.appendChild(jumpTd);
+
+      var scopeTd = document.createElement('td');
+      scopeTd.style.textAlign = 'center';
+      var scopeChk = document.createElement('input');
+      scopeChk.type = 'checkbox';
+      scopeChk.title = 'Not in Scope';
+      scopeChk.checked = !!o.noWork;
+      scopeChk.addEventListener('change', function(){
+        o.noWork = scopeChk.checked;
+        refreshSvg(); updateInlinePanel(); buildSchedule(); scheduleSave();
+      });
+      scopeTd.appendChild(scopeChk);
+      tr.appendChild(scopeTd);
+
       tr.appendChild(document.createElement('td'));
       tbody.appendChild(tr);
     });
@@ -2828,7 +2865,15 @@ function updateInlinePanel(){
     var delBtn3 = document.createElement('button');
     delBtn3.type='button'; delBtn3.className='ipActionBtn ipDangerBtn'; delBtn3.style.width='100%';
     delBtn3.textContent = 'Delete this '+(il.kind==='rect'?'rectangle':'line');
-    delBtn3.addEventListener('click', function(){ deleteInteriorItem(il.id); });
+    delBtn3.addEventListener('click', function(){
+      var kindLabel = il.kind==='rect' ? 'interior rectangle' : 'interior line';
+      showConfirmDialog({
+        title: 'Delete this '+kindLabel+'?',
+        message: 'This removes it from the plan. To resize instead, delete it and draw a new one.',
+        okLabel: 'Delete', danger: true,
+        onConfirm: function(){ deleteInteriorItem(il.id); toast(kindLabel.charAt(0).toUpperCase()+kindLabel.slice(1)+' deleted'); }
+      });
+    });
     actionsRow3.appendChild(delBtn3);
     ibody.appendChild(actionsRow3);
     return;
@@ -2877,7 +2922,15 @@ function updateInlinePanel(){
     var delBtn2 = document.createElement('button');
     delBtn2.type='button'; delBtn2.className='ipActionBtn ipDangerBtn'; delBtn2.style.width='100%';
     delBtn2.textContent='Delete this label';
-    delBtn2.addEventListener('click', function(){ deleteLabel(lab.id); });
+    delBtn2.addEventListener('click', function(){
+      var labelName = lab.text || 'this label';
+      showConfirmDialog({
+        title: 'Delete this label?',
+        message: 'This removes "'+labelName+'" from the plan.',
+        okLabel: 'Delete', danger: true,
+        onConfirm: function(){ deleteLabel(lab.id); toast('Label deleted'); }
+      });
+    });
     actionsRow2.appendChild(delBtn2);
     lbody.appendChild(actionsRow2);
     return;
@@ -3015,10 +3068,19 @@ function updateInlinePanel(){
       var sel = document.createElement('select');
       sel.disabled = !!o.noWork;
       var isOtherFlag = o.cells && o.cells[col.key+'IsOther'];
+      var currentVal = isOtherFlag ? 'Other' : (o.cells && o.cells[col.key]);
+      // Nothing chosen yet - show a real blank option instead of letting the browser fall back
+      // to displaying option 0 (e.g. "Rerope") for a value with no match in the list. See the
+      // matching schedule-table renderer above for the full explanation.
+      if(options.indexOf(currentVal) === -1){
+        var blankOpt = document.createElement('option');
+        blankOpt.value=''; blankOpt.textContent=''; blankOpt.selected = true;
+        sel.appendChild(blankOpt);
+      }
       options.forEach(function(optText){
         var opt = document.createElement('option');
         opt.value = optText; opt.textContent = optText;
-        if(isOtherFlag ? optText==='Other' : (o.cells && o.cells[col.key]===optText)) opt.selected = true;
+        if(currentVal===optText) opt.selected = true;
         sel.appendChild(opt);
       });
       sel.addEventListener('change', function(){
