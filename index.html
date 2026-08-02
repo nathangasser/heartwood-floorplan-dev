@@ -679,9 +679,7 @@ function adjacentEdgeKeys(verts, edgeIndex){
 // distance) - it changes the length of the two NEIGHBORING walls that each share one of those
 // endpoints. So the hard-stop checks both neighbors' combined-opening-width minimums, not the
 // dragged wall itself.
-// gapBaseline (optional): {wallKey: [gap, gap, ...]} frozen at the start of a drag gesture -
-// see startWallDrag for why this matters.
-function pushWall(edgeIndex, delta, gapBaseline){
+function pushWall(edgeIndex, delta){
   var lvl = currentLevel();
   var verts = lvl.vertices, n = verts.length;
   var i2 = (edgeIndex+1)%n, i0 = (edgeIndex-1+n)%n, i3 = (i2+1)%n;
@@ -721,64 +719,51 @@ function pushWall(edgeIndex, delta, gapBaseline){
     var nx = snap(v1.x+safeDelta);
     v1.x = nx; v2.x = nx;
   }
-  clampOpeningsToWalls(gapBaseline);
+  clampOpeningsToWalls([prevEdgeKey, nextEdgeKey]);
 }
 
-// Scales the gaps between openings on a wall proportionally as it resizes, in order, never
-// letting them overlap. Shrinking compresses the gaps down (racking them edge-to-edge once
-// gaps hit zero - pushWall's hard-stop above prevents shrinking past that point). Growing
-// spreads the gaps back out using whatever ratio they're currently at, which may or may not
-// match the original pre-rack proportions - that's fine, nothing needs to be remembered.
-function rackOpeningsOnWall(openingsOnWall, wallLen, baseline){
+// Round 10k simplification: no more proportional gap-scaling. An opening's offset (distance from
+// its wall's start vertex) is left completely untouched unless it would actually overlap the
+// previous opening or run past the wall's new (shorter) end - in which case it's nudged the
+// minimum amount needed, nothing more. Replaces the old rackOpeningsOnWall, which tried to scale
+// every gap on a wall proportionally as it resized - that model only ever tracked the space
+// BEFORE each opening, never the gap trailing the last one, so any resize (even a tiny one)
+// silently swallowed that trailing gap and dragged the whole opening group toward the far end of
+// the wall. This version can't do that: it has no concept of "redistribute the free space," it
+// only reacts to an actual conflict.
+function fitOpeningsToWall(openingsOnWall, wallLen){
   if(!openingsOnWall.length) return;
   var sorted = openingsOnWall.slice().sort(function(a,b){ return a.offset - b.offset; });
-  var totalWidth = sorted.reduce(function(sum,o){ return sum+o.width; }, 0);
 
-  if(totalWidth >= wallLen){
-    var x = 0;
-    sorted.forEach(function(o){ o.offset = snap(x); x += o.width; });
-    return;
-  }
+  // Left-to-right: push each opening forward only enough to clear the one before it. Anything
+  // that already fits (the overwhelming common case) is never touched.
+  var minStart = 0;
+  sorted.forEach(function(o){
+    if(o.offset < minStart) o.offset = minStart;
+    minStart = o.offset + o.width;
+  });
 
-  // baseline (optional): gap ratios frozen at the start of the current drag gesture. Without
-  // it, gaps would be re-derived from the already-snapped result of the previous call every
-  // time - fine for a single step, but across many small steps in one drag that compounds
-  // rounding drift and can let an individual gap snap to exactly zero and get stuck there even
-  // as the wall keeps growing. Freezing the ratios for the gesture avoids that; a brand new
-  // drag gesture later is free to establish a new baseline from wherever things ended up.
-  var naturalGaps = baseline;
-  if(!naturalGaps || naturalGaps.length !== sorted.length){
-    naturalGaps = [];
-    for(var i=0;i<sorted.length;i++){
-      var prevEnd = i===0 ? 0 : (sorted[i-1].offset + sorted[i-1].width);
-      naturalGaps.push(Math.max(0, sorted[i].offset - prevEnd));
+  // If the wall shrank enough that the pass above pushed the last opening(s) past the new end,
+  // pack back from the far end instead - this only ever engages once there's a genuine overflow,
+  // and never moves an opening that was already clear of it.
+  var overflow = minStart - wallLen;
+  if(overflow > 0.001){
+    var maxEnd = wallLen;
+    for(var i=sorted.length-1; i>=0; i--){
+      var o = sorted[i];
+      if(o.offset + o.width > maxEnd) o.offset = maxEnd - o.width;
+      maxEnd = o.offset;
     }
   }
-  var totalNaturalGap = naturalGaps.reduce(function(a,b){ return a+b; }, 0);
-  var availableGapSpace = wallLen - totalWidth;
-  var gapScale = totalNaturalGap > 0 ? (availableGapSpace/totalNaturalGap) : 0;
 
-  var x = 0;
-  sorted.forEach(function(o, i){
-    x += naturalGaps[i]*gapScale;
-    o.offset = snap(Math.max(0, x));
-    x += o.width;
-  });
+  sorted.forEach(function(o){ o.offset = snap(o.offset); });
 }
 
-function computeGapBaseline(lvl, wallKey){
-  var openingsOnWall = lvl.openings.filter(function(o){ return o.wallKey===wallKey; });
-  if(!openingsOnWall.length) return null;
-  var sorted = openingsOnWall.slice().sort(function(a,b){ return a.offset - b.offset; });
-  var gaps = [];
-  for(var i=0;i<sorted.length;i++){
-    var prevEnd = i===0 ? 0 : (sorted[i-1].offset + sorted[i-1].width);
-    gaps.push(Math.max(0, sorted[i].offset - prevEnd));
-  }
-  return gaps;
-}
-
-function clampOpeningsToWalls(gapBaseline){
+// resizedKeys (optional): the two wallKeys whose length actually just changed this drag (the
+// walls adjacent to whichever edge was grabbed - see pushWall). Only those walls, or any wall
+// that's ended up in genuine overflow (openings no longer fit - e.g. leftover data corruption),
+// get passed through fitOpeningsToWall. Every other wall in the level is left completely alone.
+function clampOpeningsToWalls(resizedKeys){
   var lvl = currentLevel();
   var eByKey = {};
   edges(lvl.vertices).forEach(function(e){ eByKey[e.key]=e; });
@@ -790,19 +775,10 @@ function clampOpeningsToWalls(gapBaseline){
   });
   Object.keys(byWall).forEach(function(key){
     var wallLen = eByKey[key].len;
-    var isResizedWall = !!(gapBaseline && gapBaseline[key]);
     var totalWidth = byWall[key].reduce(function(sum,o){ return sum+o.width; }, 0);
-    // Only re-rack a wall whose length actually just changed this drag (the two walls adjacent
-    // to whatever edge was grabbed - tracked via gapBaseline), or one that's now in genuine
-    // overflow (openings no longer fit, e.g. leftover data corruption). Every other wall is left
-    // untouched: rackOpeningsOnWall's gap model only tracks the space BEFORE each opening, never
-    // the trailing gap after the last one on a wall - re-deriving "before" gaps from current
-    // offsets and reapplying them silently swallows that trailing gap into the before-gaps,
-    // dragging the whole opening group toward the far end of the wall. That was firing on every
-    // wall in the level on every drag tick, not just the wall actually being resized - see
-    // Round 10j notes.
+    var isResizedWall = resizedKeys && resizedKeys.indexOf(key) !== -1;
     if(isResizedWall || totalWidth > wallLen + 0.01){
-      rackOpeningsOnWall(byWall[key], wallLen, gapBaseline && gapBaseline[key]);
+      fitOpeningsToWall(byWall[key], wallLen);
     }
   });
 }
@@ -3368,21 +3344,13 @@ function startWallDrag(edgeIndex, evt){
   var startVal = horizontal ? e0.v1.y : e0.v1.x;
   var startP = svgPoint(evt);
 
-  // Freeze the opening-gap ratios on both affected walls at the start of this gesture (see
-  // rackOpeningsOnWall) so they scale smoothly for the whole drag instead of drifting from
-  // being re-derived off already-snapped positions on every intermediate step.
-  var keys = adjacentEdgeKeys(lvl.vertices, edgeIndex);
-  var gapBaseline = {};
-  var b1 = computeGapBaseline(lvl, keys.prevEdgeKey); if(b1) gapBaseline[keys.prevEdgeKey] = b1;
-  var b2 = computeGapBaseline(lvl, keys.nextEdgeKey); if(b2) gapBaseline[keys.nextEdgeKey] = b2;
-
   function onMove(ev){
     var p = svgPoint(ev);
     var e = edges(currentLevel().vertices)[edgeIndex];
     var delta = horizontal ? (p.y-startP.y) : (p.x-startP.x);
     var target = startVal + delta;
     var cur = horizontal ? e.v1.y : e.v1.x;
-    pushWall(edgeIndex, target-cur, gapBaseline);
+    pushWall(edgeIndex, target-cur);
     refreshSvg();
   }
   function onUp(){

@@ -877,6 +877,38 @@ Frontend-only, syntax-checked clean. Worth confirming on a real device: drag a w
 plenty of other windows/doors scattered on OTHER walls (especially any not flush against a wall's
 far end) and confirm nothing outside the two walls actually being resized moves at all.
 
+## Round 10k - Round 10j's fix wasn't enough - simplified the whole gap model
+Nathan retested Round 10j: better, but the corner-slide was still happening on the two walls that
+DO legitimately get resized (the ones adjacent to whatever's dragged). Same root cause, just no
+longer able to leak onto unrelated walls: rackOpeningsOnWall's proportional gap-scaling model only
+ever tracked the space BEFORE each opening on a wall, never the trailing gap after the last one -
+so even the walls that ARE supposed to be re-laid-out during a resize would swallow any trailing
+gap into the "before" gaps and drag the whole opening group toward the far end. Nathan's call:
+"is this the scaling feature? if so, simplify it. this is terrible" - agreed, and rebuilt it.
+
+Old model: freeze each affected wall's gap *ratios* at drag start (computeGapBaseline), then scale
+all of them by a single factor as the wall's length changes (rackOpeningsOnWall). Removed entirely,
+along with the gapBaseline plumbing through pushWall/startWallDrag - gone completely.
+
+New model (fitOpeningsToWall, replaces rackOpeningsOnWall): an opening's offset is left completely
+untouched unless it would actually overlap the previous opening or run past the wall's new
+(shorter) end - and even then it's nudged the minimum amount needed, not redistributed. No concept
+of "spread the free space out," so there's nothing for it to mismodel. Verified with a standalone
+simulation (not just reading the code) covering: wall unchanged, wall grows, wall shrinks but still
+fits, wall shrinks past capacity (correctly pulls back from the far end only as far as needed), and
+a wall with a large trailing gap after the last opening (previously the exact scenario that broke) -
+all came back correct, most as true no-ops.
+
+clampOpeningsToWalls still only touches the two walls whose length actually changed this drag
+(now passed explicitly as resizedKeys from pushWall, no baseline object needed) or a wall in
+genuine overflow - Round 10j's scoping fix is kept, just simplified alongside everything else.
+
+Frontend-only, syntax-checked clean + logic verified via a standalone Node simulation of the new
+function (not full app testing). Worth confirming on a real device: shrink a wall that has several
+openings on it down toward its hard-stop and confirm they compress from the correct end only, and
+re-run the original repro (drag any wall, confirm nothing on OTHER walls moves, and now also
+confirm the two walls that ARE adjacent to the drag behave sensibly instead of jumping).
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).
