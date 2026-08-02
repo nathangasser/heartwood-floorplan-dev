@@ -803,6 +803,20 @@ Frontend-only, no Lambda change. Syntax-checked clean. Worth retesting the exact
 several windows in a row, wait for Synced, then do a full reload (not just switching tabs) and
 confirm they're actually gone.
 
+## Round 10h - remove opening delete buttons from crew view - BUILT
+Hidden entirely (not just confirmed) in crew view, same principle as the rest of crew mode's
+trimming - deleting an opening is a shop-management action, not part of the day-to-day workflow,
+and crew's escape hatch is Switch to Full View if they genuinely need to:
+- Schedule row's ✕ delete button.
+- Inline panel's ("focus view") "Delete this item" button.
+
+Also noticed while in there: the inline panel's delete button had no confirm dialog at all (unlike
+the schedule's, fixed last round) - added the same danger-styled confirm + toast to it for full
+view, so both delete entry points now behave consistently.
+
+Frontend-only, syntax-checked clean. Worth confirming on a real device: crew view shows neither
+delete button anywhere for openings, full view still has both (now both behind a confirm).
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

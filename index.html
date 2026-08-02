@@ -2508,23 +2508,28 @@ function buildSchedule(){
         refreshSvg(); updateInlinePanel();
       });
       jumpTd.appendChild(jumpBtn);
-      var delBtn = document.createElement('button');
-      delBtn.className='rowDelBtn'; delBtn.textContent='\u2715'; delBtn.title='Delete'; delBtn.style.marginLeft='6px';
-      delBtn.addEventListener('click', function(){
-        var shortLbl = (o.type==='window'?'Window ':'Door ') + o.num + (o.pairRole==='active'?'A':o.pairRole==='passive'?'P':'');
-        var name = (o.cells && o.cells.label) || shortLbl;
-        showConfirmDialog({
-          title: 'Delete this opening?',
-          message: 'This removes "'+name+'" from the plan and schedule.',
-          okLabel: 'Delete', danger: true,
-          onConfirm: function(){
-            deleteOpeningFromLevel(li, o.id);
-            buildSchedule();
-            toast(name + ' deleted');
-          }
+      // Delete is a destructive, shop-management action - not part of crew's day-to-day
+      // "mark complete, flag an issue" workflow, so it's not shown at all in crew view (their
+      // escape hatch is Switch to Full View, same principle as the Options menu trim).
+      if(ui.viewMode!=='crew'){
+        var delBtn = document.createElement('button');
+        delBtn.className='rowDelBtn'; delBtn.textContent='\u2715'; delBtn.title='Delete'; delBtn.style.marginLeft='6px';
+        delBtn.addEventListener('click', function(){
+          var shortLbl = (o.type==='window'?'Window ':'Door ') + o.num + (o.pairRole==='active'?'A':o.pairRole==='passive'?'P':'');
+          var name = (o.cells && o.cells.label) || shortLbl;
+          showConfirmDialog({
+            title: 'Delete this opening?',
+            message: 'This removes "'+name+'" from the plan and schedule.',
+            okLabel: 'Delete', danger: true,
+            onConfirm: function(){
+              deleteOpeningFromLevel(li, o.id);
+              buildSchedule();
+              toast(name + ' deleted');
+            }
+          });
         });
-      });
-      jumpTd.appendChild(delBtn);
+        jumpTd.appendChild(delBtn);
+      }
       tr.appendChild(jumpTd);
       tr.appendChild(document.createElement('td'));
       tbody.appendChild(tr);
@@ -3079,12 +3084,27 @@ function updateInlinePanel(){
     o.noWork = !o.noWork;
     updateInlinePanel(); refreshSvg(); buildScheduleIfActive(); scheduleSave();
   });
-  var deleteBtn = document.createElement('button');
-  deleteBtn.type='button'; deleteBtn.className='ipActionBtn ipDangerBtn'; deleteBtn.textContent='Delete this item';
-  deleteBtn.addEventListener('click', function(){
-    deleteOpening(o.id); buildScheduleIfActive();
-  });
-  actionsRow.appendChild(noWorkBtn); actionsRow.appendChild(deleteBtn);
+  actionsRow.appendChild(noWorkBtn);
+  // Delete is a destructive, shop-management action - not shown at all in crew view, same as the
+  // schedule's delete button (their escape hatch is Switch to Full View).
+  if(ui.viewMode!=='crew'){
+    var deleteBtn = document.createElement('button');
+    deleteBtn.type='button'; deleteBtn.className='ipActionBtn ipDangerBtn'; deleteBtn.textContent='Delete this item';
+    deleteBtn.addEventListener('click', function(){
+      var name = (o.cells && o.cells.label) || shortDefault;
+      showConfirmDialog({
+        title: 'Delete this opening?',
+        message: 'This removes "'+name+'" from the plan and schedule.',
+        okLabel: 'Delete', danger: true,
+        onConfirm: function(){
+          deleteOpening(o.id);
+          buildScheduleIfActive();
+          toast(name + ' deleted');
+        }
+      });
+    });
+    actionsRow.appendChild(deleteBtn);
+  }
   body.appendChild(actionsRow);
 }
 
