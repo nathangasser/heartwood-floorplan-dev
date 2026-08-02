@@ -766,6 +766,43 @@ Frontend-only, syntax-checked clean. Worth a real-device look, especially: reada
 normal zoom level, and a door where the indicator now covers the swing arc - confirm that's
 acceptable in practice, not just in theory.
 
+## Round 10g - deleted windows silently coming back on reload - FIXED + delete now confirms
+Nathan deleted several windows via the schedule's ✕ button, plan looked clean, but reloading from
+the cloud brought a cluster of them back (some with duplicate-looking numbers, since new windows
+had reused numbers the "deleted" server-side entries still occupied).
+
+**Root cause**: `applySyncResult()` was calling `captureKnownKeysFromState()` - a full blind
+re-snapshot of whatever's currently in local state - after every successful sync response. If a
+deletion happened locally *after* an earlier, unrelated request was already sent but *before*
+that request's response came back, the blind re-snapshot would "forget" the deleted opening had
+ever existed before its own tombstone was ever actually sent to the server. The next sync's
+tombstone diff then had nothing to compare against, so it never mentioned that opening at all -
+the delete silently never reached the database, even though it looked gone locally. This is the
+same underlying class of bug as Round 10d (a response arriving after newer local activity), just
+hitting the deletion-tracking bookkeeping instead of the openings array itself - realistic to hit
+exactly when deleting several windows in a row, since each deletion's own sync can easily still be
+in flight when the next one starts.
+
+**Fix**: replaced that blind re-capture with `reconcileKnownKeysAfterSync()`, which only updates
+bookkeeping for keys that were part of THAT SPECIFIC request's own payload (using the same
+sent*ByLevel captured at request-build time from Round 10d). Anything not part of that request -
+an addition or deletion made after it was already sent - is left completely untouched, so a later
+sync can still correctly detect and report it. `captureKnownKeysFromState()`'s other call sites
+(full plan load, new plan, initial local-storage restore) are unaffected and correctly still do a
+full re-snapshot, since those really are establishing a fresh baseline from scratch.
+
+**Note for Nathan**: this only prevents it going forward - "Test 10 Floor Plan" already has the
+zombie windows baked into its stored record from before this fix. Deleting them again with the
+fix deployed should make it stick this time; no separate cleanup script needed.
+
+**Also added**: the schedule's ✕ delete button now goes through a confirm dialog first (same
+danger-styled pattern as level reset/delete), instead of deleting immediately on tap with zero
+feedback.
+
+Frontend-only, no Lambda change. Syntax-checked clean. Worth retesting the exact scenario: delete
+several windows in a row, wait for Synced, then do a full reload (not just switching tabs) and
+confirm they're actually gone.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).
