@@ -851,6 +851,32 @@ a private window) and reload - should land on the HWR Plans picker instead of a 
 signing in from a cold start should also trigger the picker right after sign-in completes; a
 shared link (?plan=...) should still go straight to that plan with no picker in the way.
 
+## Round 10j - dragging any wall shoved unrelated openings toward a corner - FIXED
+Nathan caught this with real before/after screenshots: nudged one wall near W14, and D2 (a French
+door pair on a completely different, untouched wall several edges away) visibly slid from ~58%
+along its wall to ~90% - toward the corner. "Plenty of other windows" moved too.
+
+Root cause: clampOpeningsToWalls() runs on every pointermove tick of a wall drag, and reprocesses
+EVERY wall in the level that has openings, not just the two adjacent to whatever's being dragged.
+For any wall outside the drag's frozen gap-baseline, it recomputed that wall's opening positions
+from scratch via rackOpeningsOnWall() - but that function's gap model only tracks the space BEFORE
+each opening, never the trailing gap after the last one on a wall. Re-deriving "before" gaps from
+current offsets and reapplying them silently swallowed any real trailing gap into those before-
+gaps, yanking the whole opening group toward the far end of the wall - on every wall in the plan,
+on every single drag tick, regardless of which wall was actually being resized. Hand-checking the
+math against Nathan's own numbers (58% -> ~90%) landed right in line with what the formula
+predicts for a wall with a sizeable trailing gap.
+
+Fix: clampOpeningsToWalls() now only calls rackOpeningsOnWall() for a wall if that wall is one of
+the two whose length actually changed this drag (tracked via gapBaseline, same as before), or if
+it's in genuine overflow (openings no longer fit - a real corruption/safety-net case, kept as-is).
+Every other wall's openings are left completely untouched instead of being silently "corrected"
+into the wrong spot.
+
+Frontend-only, syntax-checked clean. Worth confirming on a real device: drag a wall that has
+plenty of other windows/doors scattered on OTHER walls (especially any not flush against a wall's
+far end) and confirm nothing outside the two walls actually being resized moves at all.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

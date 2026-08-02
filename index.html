@@ -789,7 +789,21 @@ function clampOpeningsToWalls(gapBaseline){
     byWall[o.wallKey].push(o);
   });
   Object.keys(byWall).forEach(function(key){
-    rackOpeningsOnWall(byWall[key], eByKey[key].len, gapBaseline && gapBaseline[key]);
+    var wallLen = eByKey[key].len;
+    var isResizedWall = !!(gapBaseline && gapBaseline[key]);
+    var totalWidth = byWall[key].reduce(function(sum,o){ return sum+o.width; }, 0);
+    // Only re-rack a wall whose length actually just changed this drag (the two walls adjacent
+    // to whatever edge was grabbed - tracked via gapBaseline), or one that's now in genuine
+    // overflow (openings no longer fit, e.g. leftover data corruption). Every other wall is left
+    // untouched: rackOpeningsOnWall's gap model only tracks the space BEFORE each opening, never
+    // the trailing gap after the last one on a wall - re-deriving "before" gaps from current
+    // offsets and reapplying them silently swallows that trailing gap into the before-gaps,
+    // dragging the whole opening group toward the far end of the wall. That was firing on every
+    // wall in the level on every drag tick, not just the wall actually being resized - see
+    // Round 10j notes.
+    if(isResizedWall || totalWidth > wallLen + 0.01){
+      rackOpeningsOnWall(byWall[key], wallLen, gapBaseline && gapBaseline[key]);
+    }
   });
 }
 
