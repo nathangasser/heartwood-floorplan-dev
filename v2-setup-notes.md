@@ -1428,6 +1428,29 @@ shows even in edited text cells, not just the checkbox cell.
 
 `node --check` clean. Frontend only - no Lambda involved in any of these three.
 
+## Round 10y - DH geometry actually fixed this time + issue byline lighter still - BUILT
+Round 10x's "fix" over-corrected: reverting `half` fixed the jamb-tick horns but also crushed the
+3 sash lines back together, since their spacing was computed off that same `half` - two separate
+problems that had gotten tangled into one shared variable.
+
+Split them apart. `half` (jamb end ticks, and the cutout for every window type except Double Hung)
+never changes again - that's what keeps the black jamb marks exactly where every other window's
+already sit, right at the true wall face. A new `cutoutHalf` is Double Hung-only and wider (double
+`half`) - it drives both the white paper cutout AND the 3-line spacing, decoupled entirely from the
+jamb ticks. Widening the cutout specifically is safe to do because it's white polygon on white page
+background (`--paper` is `#ffffff` both times) - it's invisible past the true wall edge regardless,
+unlike the black jamb ticks, which very visibly are not the background. Verified the actual numbers:
+jamb ticks stay at 7.25 (unchanged, matches every other window type), the cutout widens to 14.5 for
+Double Hung, and the 3 sash lines land at roughly +/-8 - comfortably inside that wider cutout, with
+real gaps between all three lines again.
+
+Also lightened the issue log byline further - it was already non-bold `var(--muted)` (#4b5058) from
+Round 10x, but that still read as fairly dark next to the message. Now a dedicated lighter gray
+(#9aa0a6) just for this one line, rather than further lightening `--muted` itself, which other UI
+(empty-state text, etc.) still relies on at its current darker weight.
+
+`node --check` clean. Frontend only.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

@@ -2157,7 +2157,11 @@ function showIssueLogDialog(openingId){
       var meta = document.createElement('div');
       // Round 10x: was bold - even in --muted gray, bold at this size still pulled the eye before
       // the message itself. Plain weight lets it actually recede the way gray text is supposed to.
-      meta.style.fontSize='11px'; meta.style.fontWeight='400'; meta.style.color='var(--muted)'; meta.style.marginTop='2px';
+      // Round 10y: --muted (#4b5058) still read as fairly dark next to the message - lightened
+      // further to a dedicated, lighter gray just for this byline rather than reusing --muted,
+      // which is also relied on elsewhere (empty-state text, etc.) where that darker weight is
+      // still the right call.
+      meta.style.fontSize='11px'; meta.style.fontWeight='400'; meta.style.color='#9aa0a6'; meta.style.marginTop='2px';
       meta.textContent = shortIssueUser(entry.user) + ' · ' + shortIssueTime(entry.time);
       body.appendChild(msg); body.appendChild(meta);
 
@@ -2463,18 +2467,23 @@ function buildSvg(target, lvl, opts){
     var g = svgEl('g', {'data-role':'opening','data-id':o.id,'data-type':o.type});
 
     var half = WALL_T/2+2;
-    // Round 10x fix: Round 10w doubled `half` for Double Hung to give the 3-line symbol room -
-    // but the cutout polygon and jamb end ticks read off that same `half`, so doubling it also
-    // pushed the black jamb edges past the wall's actual interior/exterior faces, which looked
-    // wrong (every other window type's jamb ticks correctly stop right at the wall face). `half`
-    // now stays the same for every opening type - the 3 Double Hung lines below fit their spacing
-    // within this original footprint instead, so the "stacked" read comes from the line pattern
-    // itself, not from the window visually poking past the wall it's set into.
+    // Round 10y fix: Round 10x tied the Double Hung line spacing to the SAME `half` used for the
+    // black jamb end ticks, so pulling that back down to fix the "horns" (ticks poking past the
+    // true wall face) also crushed the 3 sash lines back together with no white space between
+    // them - two different problems that got tangled into one variable. Split them apart:
+    // `half` stays exactly as-is for every opening type and is what the jamb ticks below always
+    // use, so those never again extend past the wall face. `cutoutHalf` is the separate, wider
+    // white-paper-cutout extent Double Hung alone gets, purely so there's room for its sash lines
+    // to spread out with real gaps between them - safe to widen because it's white polygon on
+    // white page background, so it's invisible past the true wall edge regardless (unlike the
+    // black jamb ticks, which are very visibly not the page background).
+    var cutoutHalf = half;
+    if(o.type==='window' && o.operation==='Double Hung') cutoutHalf = half*2;
     var rectPts = [
-      {x:p1.x+nx*half, y:p1.y+ny*half},
-      {x:p2.x+nx*half, y:p2.y+ny*half},
-      {x:p2.x-nx*half, y:p2.y-ny*half},
-      {x:p1.x-nx*half, y:p1.y-ny*half}
+      {x:p1.x+nx*cutoutHalf, y:p1.y+ny*cutoutHalf},
+      {x:p2.x+nx*cutoutHalf, y:p2.y+ny*cutoutHalf},
+      {x:p2.x-nx*cutoutHalf, y:p2.y-ny*cutoutHalf},
+      {x:p1.x-nx*cutoutHalf, y:p1.y-ny*cutoutHalf}
     ];
     g.appendChild(svgEl('polygon',{points:rectPts.map(function(p){return p.x+','+p.y;}).join(' '), fill:'var(--paper)'}));
     g.appendChild(svgEl('line',{x1:p1.x,y1:p1.y,x2:p2.x,y2:p2.y,stroke:'transparent','stroke-width':26}));
@@ -2491,11 +2500,11 @@ function buildSvg(target, lvl, opts){
       if(o.operation==='Double Hung'){
         // Three full-width lines, evenly spaced, centered on the wall - replaces the old
         // two-line-plus-center-tick symbol, which read as two sashes side by side instead of two
-        // sashes stacked one behind the other (Round 10w). Kept within the same depth every other
-        // window type uses (Round 10x fix - an earlier version doubled `half` itself for this,
-        // which pushed the jamb ticks past the wall face; the "stacked" look now comes purely
-        // from the 3-line spacing, not from widening the opening's footprint).
-        var dhOff = half*0.55;
+        // sashes stacked one behind the other (Round 10w). Spacing comes off `cutoutHalf` (the
+        // wider one, Round 10y) so there's real white space between all three lines - the jamb
+        // ticks a few lines down still use the narrower `half`, so they stay put at the true wall
+        // face regardless of how far apart these lines spread.
+        var dhOff = cutoutHalf*0.55;
         [-dhOff, 0, dhOff].forEach(function(off){
           g.appendChild(svgEl('line',{
             x1:p1.x+nx*off, y1:p1.y+ny*off, x2:p2.x+nx*off, y2:p2.y+ny*off,
