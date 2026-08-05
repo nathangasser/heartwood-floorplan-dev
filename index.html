@@ -152,6 +152,13 @@
   .ipActionBtn.active{background:var(--muted); border-color:var(--muted); color:#fff;}
   .ipDangerBtn{background:var(--danger); color:#fff; border-color:var(--danger);}
 
+  /* Round 10u: small per-row delete ("x") on each issue log entry, for deleting one issue at a
+     time instead of only all-or-nothing. */
+  .issueRow{padding:8px 0; border-bottom:1px solid var(--line); display:flex; align-items:flex-start; gap:6px;}
+  .issueRowBody{flex:1; min-width:0;}
+  .issueDeleteBtn{flex:none; width:22px; height:22px; border:none; border-radius:999px; background:transparent; color:var(--muted); font-size:16px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center;}
+  .issueDeleteBtn:hover{background:var(--danger); color:#fff;}
+
   /* Round 10q: pulsing "beacon" ring around flagged-issue badges, replacing the old static
      glow - a hollow ring that grows outward and fades, repeating. Duration here (1.6s) must
      match PULSE_MS in the script, which computes each ring's animation-delay from the current
@@ -968,6 +975,43 @@ var unsyncedSinceAt = null; // when the current streak of edits-not-yet-in-the-c
 var syncInFlight = false;
 var syncQueuedWhileInFlight = false;
 
+// Round 10t - automatic retry after a genuine failure (offline, DNS hiccup, server error - not a
+// 409, which is a real conflict that needs a person's decision and is handled separately in
+// handleSaveConflict). Before this, a failed save just sat there doing nothing until either
+// another edit happened (which re-triggers syncToCloud on its own via scheduleSave) or someone
+// noticed the small indicator/the 10-minute banner and tapped it manually. In bad field reception
+// that could mean a save silently stuck for a long time with no automatic recovery attempt at all.
+//
+// RETRY_DELAYS_MS - roughly 5s/15s/30s/60s/120s, then holds at 120s for as long as failures keep
+// happening. Each delay gets +/-20% random jitter (see scheduleRetry) so that if several crew
+// devices all lose and regain signal around the same moment, they don't all hammer the API in the
+// same instant.
+var RETRY_DELAYS_MS = [5000, 15000, 30000, 60000, 120000];
+var retryAttempt = 0;
+var retryTimer = null;
+
+function clearRetryTimer(){
+  if(retryTimer){ clearTimeout(retryTimer); retryTimer = null; }
+}
+
+function scheduleRetry(){
+  clearRetryTimer();
+  if(!navigator.onLine){
+    // Nothing to schedule while offline - the 'online' listener below fires an immediate retry
+    // the moment connectivity actually comes back, which is strictly better than counting down a
+    // timer against a connection that isn't there yet.
+    return;
+  }
+  var base = RETRY_DELAYS_MS[Math.min(retryAttempt, RETRY_DELAYS_MS.length - 1)];
+  var jitter = base * 0.2 * (Math.random() * 2 - 1); // +/-20%
+  var delay = Math.max(1000, base + jitter);
+  retryAttempt++;
+  retryTimer = setTimeout(function(){
+    retryTimer = null;
+    if(hasUnflushedEdits()) syncToCloud();
+  }, delay);
+}
+
 function scheduleSave(){
   lastEditAt = Date.now();
   // Mark the start of an unsynced streak the moment it begins, not on some later timer tick -
@@ -1006,6 +1050,36 @@ function isSignedIn(){
 function setCloudIndicator(text){
   var el = document.getElementById('cloudIndicator');
   if(el) el.textContent = text;
+}
+
+// Round 10v - "just now" / "3m ago" / "2h ago", for the elapsed-time framing below.
+function formatElapsed(ms){
+  if(ms < 45000) return 'just now';
+  var mins = Math.round(ms/60000);
+  if(mins < 60) return mins + 'm ago';
+  return Math.round(mins/60) + 'h ago';
+}
+
+// True while a structural conflict dialog is open and unresolved - see handleSaveConflict. Guards
+// updateCloudStatusText below from overwriting "Conflict - choose a version" with the generic
+// unsynced-work text on the next 30s tick, which would otherwise make an unresolved conflict look
+// like an ordinary offline save.
+var conflictPending = false;
+
+// Round 10v - computes what the small persistent indicator should say right now, rather than
+// leaving a stale string sitting there from whenever it last happened to be set. Four states a
+// crew member actually needs to tell apart at a glance: mid-request, confirmed shared with the
+// team, safely saved on just this device (with how long ago it last actually made it to the
+// team), and needs-a-decision. Called both immediately after a failed save (so this framing shows
+// up right away, not after the old 10-minute wait before the big banner) and on every 30s banner
+// tick (see updateUnsyncedBanner), so "3m ago" doesn't quietly go stale while nobody touches
+// anything.
+function updateCloudStatusText(){
+  if(!isSignedIn()){ setCloudIndicator(''); return; }
+  if(conflictPending || syncInFlight) return; // those states set their own text directly
+  if(!hasUnflushedEdits()) return; // already showing "Saved to team" (or similar) from the last successful sync
+  var when = lastSuccessfulSyncAt ? 'last synced ' + formatElapsed(Date.now() - lastSuccessfulSyncAt) : 'not yet synced this session';
+  setCloudIndicator((navigator.onLine ? 'Saved on this device - ' : 'Offline - saved on this device - ') + when);
 }
 
 function apiFetch(path, opts){
@@ -1101,11 +1175,11 @@ function syncToCloud(){
     photos: collectPhotoKeys(),
     expectedStructuralEditedAt: state.structuralLastEditedAt
   };
-  setCloudIndicator('Syncing…');
+  setCloudIndicator('Saving to team…');
   apiFetch('/plans/' + state.planId, { method:'PUT', body: JSON.stringify(body) })
     .then(function(res){
       if(res.status === 409){
-        return res.json().then(function(conflict){ handleSaveConflict(conflict); });
+        return res.json().then(function(conflict){ handleSaveConflict(conflict, payload.openingsByLevel, payload.labelsByLevel); });
       }
       if(!res.ok) throw new Error('save failed: ' + res.status);
       return res.json().then(function(result){
@@ -1114,21 +1188,71 @@ function syncToCloud(){
         lastSuccessfulSyncAt = Date.now();
         unsyncedSinceAt = null; // this is what actually clears the unsynced-work banner
         updateUnsyncedBanner(); // react immediately instead of waiting up to 30s for the next timer tick
-        setCloudIndicator(result.conflicts && result.conflicts.length ? 'Synced - review needed' : 'Synced');
+        setCloudIndicator(result.conflicts && result.conflicts.length ? 'Saved to team - review needed' : 'Saved to team');
+        // A real save landed - whatever retry countdown was running (if any) is no longer needed.
+        retryAttempt = 0;
+        clearRetryTimer();
         return persistSet(SAVE_KEY, JSON.stringify(state));
       });
     })
     .catch(function(err){
       console.error('Cloud sync failed', err);
-      setCloudIndicator('Not synced');
+      // Round 10t - automatically try again rather than waiting on another edit or a manual tap.
+      // Skipped when syncQueuedWhileInFlight is about to fire its own immediate retry anyway (set
+      // below, right after this) - no point scheduling a second one on top of that.
+      if(!syncQueuedWhileInFlight) scheduleRetry();
     })
     .then(function(){
       syncInFlight = false;
       if(syncQueuedWhileInFlight){
         syncQueuedWhileInFlight = false;
         syncToCloud();
+      } else {
+        // Round 10v - show the elapsed-time framing right away on a failure instead of a bare
+        // "Not synced", reserving the big banner for the 10-minute mark - this small indicator
+        // shouldn't make someone wait that long to find out a save didn't make it to the team.
+        // (No-ops harmlessly on a success, since hasUnflushedEdits() is already false by then.)
+        updateCloudStatusText();
       }
     });
+}
+
+// Order-independent deep equality - same job as the Lambda's own deepEqual (see index.mjs), kept
+// as a separate copy here since the frontend and Lambda don't share a module. Needed below to
+// tell "nothing changed since this request was sent" apart from "this got edited again while the
+// request was in flight" - a plain JSON.stringify comparison would be key-order-sensitive and can
+// false-positive on objects that are actually identical, same failure mode as Round 9e.
+function deepEqualLocal(a, b){
+  if(a === b) return true;
+  if(a===null || b===null || typeof a!=='object' || typeof b!=='object') return false;
+  if(Array.isArray(a) !== Array.isArray(b)) return false;
+  if(Array.isArray(a)){
+    if(a.length !== b.length) return false;
+    for(var i=0;i<a.length;i++){ if(!deepEqualLocal(a[i], b[i])) return false; }
+    return true;
+  }
+  var ak = Object.keys(a), bk = Object.keys(b);
+  if(ak.length !== bk.length) return false;
+  for(var j=0;j<ak.length;j++){
+    var k = ak[j];
+    if(!Object.prototype.hasOwnProperty.call(b,k)) return false;
+    if(!deepEqualLocal(a[k], b[k])) return false;
+  }
+  return true;
+}
+
+// True if this opening's current local state is identical to the snapshot that was actually sent
+// in the request this response answers - ignoring `photos` (the base64 preview never travels
+// through sync at all, see buildCloudPayload, so it's never present on the sent snapshot).
+function openingMatchesSent(o, sent){
+  if(!sent) return false;
+  var keys = {};
+  Object.keys(o).forEach(function(k){ if(k!=='photos') keys[k]=true; });
+  Object.keys(sent).forEach(function(k){ keys[k]=true; });
+  for(var k in keys){
+    if(!deepEqualLocal(o[k], sent[k])) return false;
+  }
+  return true;
 }
 
 // Reconciles local state after a successful PUT (200, body: {item, conflicts}).
@@ -1147,6 +1271,20 @@ function syncToCloud(){
 // it yet, and the next queued sync would have picked it up. This is what was still causing
 // windows to flicker away when adding several in quick succession (Round 10d).
 //
+// Round 10r: that same "sent payload" tracking is now also used to guard against a second, subtler
+// bug found in field testing - edits silently disappearing with no conflict dialog at all, even
+// solo, no second device involved. Sequence: edit a window's Service Level (schedules a save),
+// then edit something else on that SAME window (mark it complete, change a note) before the first
+// save's response comes back. When that response landed, this function used to apply it via a
+// blind Object.assign(o, merged) - but `merged` only reflects the FIRST edit, since that's all the
+// first request ever sent. The second edit, already sitting in `o` locally, got silently
+// overwritten by the server's older confirmation. Fixed the same way Round 10d fixed the deletion
+// case: before fully applying a response to an opening/label, check whether its current local
+// state still matches what was actually sent. If yes, apply normally (the common case). If it's
+// since diverged, only the confirmed lastEditedAt baseline advances - the newer local content is
+// left alone and rides along on the next already-queued sync (syncQueuedWhileInFlight), which will
+// now match cleanly against this corrected baseline instead of looking like a false conflict.
+//
 // Interim conflict handling: this applies whichever version the server kept (the other side's,
 // per Decision 3 - true conflicts never silently overwrite) and toasts that it happened, so nothing
 // is lost without at least being surfaced. This is a placeholder for the scoped "keep mine / keep
@@ -1164,6 +1302,12 @@ function applySyncResult(result, sentOpeningsByLevel, sentLabelsByLevel){
     lvl.openings = (lvl.openings||[]).filter(function(o){
       var merged = oMap[o.id];
       if(merged && !merged.__deleted){
+        if((o.id in sentO) && !openingMatchesSent(o, sentO[o.id])){
+          // Edited again locally after this specific request was already sent - don't let an
+          // older response stomp a newer local edit. Just advance the baseline; content stays.
+          o.lastEditedAt = merged.lastEditedAt;
+          return true;
+        }
         var localPhotos = o.photos; // never sent/returned by the server - preserve it locally
         Object.assign(o, merged);
         o.photos = localPhotos;
@@ -1180,6 +1324,10 @@ function applySyncResult(result, sentOpeningsByLevel, sentLabelsByLevel){
     lvl.labels = (lvl.labels||[]).filter(function(l){
       var merged = lMap[l.id];
       if(merged && !merged.__deleted){
+        if((l.id in sentL) && !deepEqualLocal(l, sentL[l.id])){
+          l.lastEditedAt = merged.lastEditedAt;
+          return true;
+        }
         Object.assign(l, merged);
         return true;
       }
@@ -1241,15 +1389,32 @@ function uploadPhotoToCloud(openingId, slot, dataUrl){
 // with a StructuralConflict error. Opening/label conflicts no longer 409 at all; they come back
 // as a 200 with a conflicts[] list, handled by applySyncResult() instead. Structural changes stay
 // all-or-nothing per Decision 1, so this dialog is unchanged in spirit - just renamed fields.
-function handleSaveConflict(conflict){
-  setCloudIndicator('Conflict - action needed');
+//
+// sentOpeningsByLevel/sentLabelsByLevel are the payload from the specific request that got this
+// 409 - passed through so "Keep my changes" (below) can reconcile with them, same as a normal 200.
+//
+// Round 10t: "Keep my changes" used to only update state.structuralLastEditedAt before retrying -
+// but conflict.current (the Lambda's `item`) already carries the openings/labels merge that ran
+// alongside the structural conflict (per computeSave, that merge always runs, 409 or not), each
+// with a fresh server-assigned lastEditedAt. Never picking that up locally meant every opening/
+// label baseline stayed stale, so the retry could report a false "someone else changed this too"
+// conflict on something nobody actually touched twice - just because this client's copy of that
+// baseline never got updated in the first place. Fixed by routing through applySyncResult, the
+// same reconciliation already used for a normal save - conflict.current has the exact same shape
+// as a 200 response's `item`, and conflict.conflicts is the same per-key conflicts list, so this
+// is not new logic, just reusing the tested one on a path that skipped it before.
+function handleSaveConflict(conflict, sentOpeningsByLevel, sentLabelsByLevel){
+  setCloudIndicator('Conflict - choose a version');
+  conflictPending = true; // see updateCloudStatusText - keeps the 30s tick from overwriting this
   showMenuDialog('Structural changes (walls/levels) were also made elsewhere', [
     { label: 'Keep my changes (overwrite theirs)', onClick: function(){
-        state.structuralLastEditedAt = conflict.current.structuralLastEditedAt;
+        conflictPending = false;
+        applySyncResult({ item: conflict.current, conflicts: conflict.conflicts }, sentOpeningsByLevel, sentLabelsByLevel);
         syncToCloud();
       }
     },
     { label: 'Discard mine, load ' + (conflict.current.lastEditedBy || 'their') + ' version', onClick: function(){
+        conflictPending = false;
         loadCloudPlanIntoState(conflict.current);
         toast('Loaded the latest version');
       }, danger: true
@@ -1279,9 +1444,30 @@ function hasUnflushedEdits(){
 var REFRESH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 var refreshCheckTimer = null;
 
+// Round 10t: this used to always hit the full getPlan endpoint - the entire plan body, plus a
+// freshly signed URL for every photo, just to compare one timestamp. Now tries the lightweight
+// /revision endpoint first (planId/lastEditedAt/structuralLastEditedAt/lastEditedBy only, no
+// photos, no data blob) and only pulls the full plan on the rarer path where something actually
+// changed. Falls back to the old full-plan check if /revision isn't reachable (a non-ok response,
+// including a 404 if that route isn't set up in API Gateway yet) - so this degrades to exactly
+// today's behavior rather than silently losing the "someone else changed this" nudge if the new
+// route isn't live yet.
 function checkForNewerVersion(){
   if(!isSignedIn() || !state.planId) return;
   if(activeDragCleanup) return; // don't refresh out from under an in-progress drag/gesture
+  apiFetch('/plans/' + state.planId + '/revision').then(function(res){
+    if(!res.ok) throw new Error('revision check failed: ' + res.status);
+    return res.json();
+  }).then(function(rec){
+    if(!rec || !rec.lastEditedAt || rec.lastEditedAt === state.lastEditedAt) return;
+    // Something changed - now it's worth paying for the full plan (photos and all).
+    return checkForNewerVersionFull();
+  }).catch(function(){ checkForNewerVersionFull(); });
+}
+
+function checkForNewerVersionFull(){
+  if(!isSignedIn() || !state.planId) return;
+  if(activeDragCleanup) return;
   apiFetch('/plans/' + state.planId).then(function(res){
     return res.ok ? res.json() : null;
   }).then(function(rec){
@@ -1307,6 +1493,9 @@ var UNSYNCED_WARNING_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
 var unsyncedBannerTimer = null;
 
 function updateUnsyncedBanner(){
+  // Round 10v - same tick also keeps the small indicator's elapsed-time text ("3m ago") fresh,
+  // so it doesn't quietly go stale between failures if nobody touches anything for a while.
+  updateCloudStatusText();
   var banner = document.getElementById('unsyncedBanner');
   if(!banner) return;
   var staleMs = unsyncedSinceAt ? (Date.now() - unsyncedSinceAt) : 0;
@@ -1329,7 +1518,44 @@ function startPeriodicRefreshCheck(){
   if(refreshCheckTimer) clearInterval(refreshCheckTimer);
   refreshCheckTimer = setInterval(checkForNewerVersion, REFRESH_CHECK_INTERVAL_MS);
   document.addEventListener('visibilitychange', function(){
-    if(document.visibilityState === 'visible') checkForNewerVersion();
+    if(document.visibilityState !== 'visible') return;
+    checkForNewerVersion();
+    // Round 10t - coming back to the tab/app is also a good moment to retry a stuck save, same
+    // spirit as the 'online' listener below - don't make someone wait out a backoff timer that
+    // was counting down while they weren't even looking.
+    if(navigator.onLine && hasUnflushedEdits()) syncToCloud();
+  });
+}
+
+// Round 10t - the app previously had zero awareness of the browser's connectivity state; a failed
+// fetch while offline just looked like any other failure, retried on the same blind backoff
+// schedule as a flaky-but-technically-connected request would. Two small wins from wiring this up
+// explicitly: retries stop counting down while there's definitely no connection to retry over
+// (scheduleRetry already checks navigator.onLine before arming a timer), and the moment the
+// browser reports the connection is back, a stuck save fires immediately instead of waiting out
+// whatever's left of its backoff delay.
+function startConnectivityListeners(){
+  window.addEventListener('online', function(){
+    clearRetryTimer();
+    if(hasUnflushedEdits()) syncToCloud();
+  });
+  window.addEventListener('offline', function(){
+    clearRetryTimer();
+  });
+}
+
+// Round 10v - warns before closing/navigating away if there's an edit that hasn't reached the
+// team yet. The work itself is never at risk either way (IndexedDB already has it, and a future
+// sync will pick it up), but someone closing the tab thinking "saved" means "the team has it" -
+// which was easy to assume with only a small always-there indicator to notice - could walk away
+// believing a note or status change went out when it's actually still sitting on just this device.
+// Browsers ignore custom message text in this dialog for security reasons and show their own
+// generic wording instead - setting returnValue is still required to trigger the prompt at all.
+function startUnloadGuard(){
+  window.addEventListener('beforeunload', function(ev){
+    if(!hasUnflushedEdits()) return;
+    ev.preventDefault();
+    ev.returnValue = 'Your changes are safe on this device, but the team has not received them yet.';
   });
 }
 
@@ -1681,6 +1907,7 @@ function migrateOpeningToV3(o){
   if(!o.photoKeys) o.photoKeys = {interior:null, exterior:null};
   if(o.lastEditedAt===undefined) o.lastEditedAt = null; // Phase 2b per-opening conflict baseline
   if(!Array.isArray(o.issues)) o.issues = []; // Opening Status Indicators & Issue Tracking
+  if(!Array.isArray(o.deletedIssueIds)) o.deletedIssueIds = []; // Round 10u - per-issue delete tombstones
   if(o.cells && typeof o.cells.inProgress === 'boolean'){
     // inProgress moved from a checkbox to a 25/50/75/90% dropdown - a boolean doesn't map to any
     // specific percent, so clear it rather than guess; the crew can set a real value next time
@@ -1851,11 +2078,32 @@ function showPromptDialog(opts){
   setTimeout(function(){ input.focus(); input.select(); }, 30);
 }
 
+// Round 10u: an issue entry's identity for union/delete purposes - see the matching issueKey() in
+// index.mjs, this must compute the exact same thing. Entries created after this shipped carry a
+// real `id` (assigned at creation, below). Older entries already stored from before this existed
+// never had one, so they fall back to the same (time, user, message) tuple unionIssues always
+// deduped by - keeps old data addressable for deletion without needing a migration pass.
+function issueKeyLocal(entry){
+  return entry.id || JSON.stringify([entry.time, entry.user, entry.message]);
+}
+
+// Marks a single issue as deleted - adds its identity to o.deletedIssueIds (a grow-only tombstone
+// set, unioned and kept forever server-side, same pattern as deleted openings/labels elsewhere in
+// this app) and drops it from the local issues array for instant feedback. Replaces the Round 10r
+// issuesClearedAt watermark, which only supported clearing everything at once - this handles both
+// "delete just this one" (the new x button) and "Resolved (clear all)" (below), through the same
+// mechanism.
+function deleteIssueEntry(o, entry){
+  if(!Array.isArray(o.deletedIssueIds)) o.deletedIssueIds = [];
+  var key = issueKeyLocal(entry);
+  if(o.deletedIssueIds.indexOf(key) === -1) o.deletedIssueIds.push(key);
+  o.issues = (o.issues||[]).filter(function(e){ return issueKeyLocal(e) !== key; });
+}
+
 // Per-opening issue log - Opening Status Indicators & Issue Tracking. Entries are
-// {time, user, message}, append-only from the UI's point of view (the "Resolved" action clears
-// the whole array in one go, individual entries are never edited or removed one at a time).
-// Union-merge semantics for concurrent additions to the same opening live in the Lambda
-// (Round 10a) - nothing special needed here, this just appends locally and syncs normally.
+// {id, time, user, message}. Union-merge semantics for concurrent additions, and tombstone-based
+// deletion (single entry or all at once) both live in the Lambda (Round 10a / 10u) - nothing
+// special needed here beyond calling deleteIssueEntry, which just syncs normally afterward.
 function showIssueLogDialog(openingId){
   var lvl = currentLevel();
   var o = lvl.openings.find(function(x){ return x.id===openingId; });
@@ -1877,15 +2125,29 @@ function showIssueLogDialog(openingId){
   } else {
     // Newest first, so a fresh note doesn't require scrolling to find.
     o.issues.slice().sort(function(a,b){ return (b.time||'').localeCompare(a.time||''); }).forEach(function(entry){
-      var row = document.createElement('div');
-      row.style.padding='8px 0'; row.style.borderBottom='1px solid var(--line)';
-      var meta = document.createElement('div');
-      meta.style.fontSize='11px'; meta.style.fontWeight='700'; meta.style.color='var(--muted)';
-      meta.textContent = (entry.user||'Unknown') + ' · ' + (entry.time ? new Date(entry.time).toLocaleString() : '');
+      var row = document.createElement('div'); row.className = 'issueRow';
+
+      // Round 10u: message first, meta (who/when) below it - the message is what someone
+      // actually needs to read at a glance; the byline was outranking it before.
+      var body = document.createElement('div'); body.className = 'issueRowBody';
       var msg = document.createElement('div');
-      msg.style.fontSize='14px'; msg.style.marginTop='2px'; msg.style.wordBreak='break-word';
+      msg.style.fontSize='14px'; msg.style.wordBreak='break-word';
       msg.textContent = entry.message;
-      row.appendChild(meta); row.appendChild(msg);
+      var meta = document.createElement('div');
+      meta.style.fontSize='11px'; meta.style.fontWeight='700'; meta.style.color='var(--muted)'; meta.style.marginTop='2px';
+      meta.textContent = (entry.user||'Unknown') + ' · ' + (entry.time ? new Date(entry.time).toLocaleString() : '');
+      body.appendChild(msg); body.appendChild(meta);
+
+      var delBtn = document.createElement('button');
+      delBtn.type='button'; delBtn.className='issueDeleteBtn'; delBtn.title='Delete this issue';
+      delBtn.textContent = '×';
+      delBtn.addEventListener('click', function(){
+        deleteIssueEntry(o, entry);
+        refreshSvg(); updateInlinePanel(); buildScheduleIfActive(); scheduleSave();
+        showIssueLogDialog(openingId); // rebuild in place so the removal shows immediately
+      });
+
+      row.appendChild(body); row.appendChild(delBtn);
       card.appendChild(row);
     });
   }
@@ -1900,7 +2162,7 @@ function showIssueLogDialog(openingId){
   function submitAdd(){
     var msg = addInp.value.trim();
     if(!msg) return;
-    o.issues.push({ time: new Date().toISOString(), user: currentUserEmail || 'Unknown', message: msg });
+    o.issues.push({ id: nextId(), time: new Date().toISOString(), user: currentUserEmail || 'Unknown', message: msg });
     refreshSvg(); buildScheduleIfActive(); scheduleSave();
     showIssueLogDialog(openingId); // rebuild in place so the new entry shows immediately
   }
@@ -1921,7 +2183,9 @@ function showIssueLogDialog(openingId){
         message: 'This removes all '+count+' logged issue'+(count===1?'':'s')+' for this opening. This can’t be undone.',
         okLabel: 'Clear', danger: true,
         onConfirm: function(){
-          o.issues = [];
+          // Deletes every currently-listed issue through the same one-at-a-time mechanism as the
+          // x button, just applied to all of them in one go - see deleteIssueEntry.
+          o.issues.slice().forEach(function(entry){ deleteIssueEntry(o, entry); });
           refreshSvg(); updateInlinePanel(); buildScheduleIfActive(); scheduleSave();
           toast('Issues cleared');
         }
@@ -2729,6 +2993,7 @@ function convertToFrenchPair(o){
     photoKeys: Object.assign({interior:null, exterior:null}, o.photoKeys),
     lastEditedAt: null, // a new id the server has never seen - not o's baseline
     issues: [], // new id, new physical opening (of a pair) - doesn't inherit the original's issue log
+    deletedIssueIds: [],
     cells: Object.assign({}, baseCells, {label: shortPrefix+o.num+'A', operation:'French Pair', swing: o.type==='door' ? 'Inswing, Left' : ''})
   });
   var passive = Object.assign({}, o, {
@@ -2741,6 +3006,7 @@ function convertToFrenchPair(o){
     photoKeys: Object.assign({interior:null, exterior:null}, o.photoKeys),
     lastEditedAt: null, // a new id the server has never seen - not o's baseline
     issues: [], // new id, new physical opening (of a pair) - doesn't inherit the original's issue log
+    deletedIssueIds: [],
     cells: Object.assign({}, baseCells, {label: shortPrefix+o.num+'P', operation:'French Pair', swing: o.type==='door' ? 'Inswing, Right' : ''})
   });
 
@@ -2787,6 +3053,7 @@ function addOpening(type, wallKey, along, wallLen){
     photoKeys: {interior:null, exterior:null},
     lastEditedAt: null,
     issues: [],
+    deletedIssueIds: [],
     cells: {
       label: shortLabel, type: typeName, operation: operation,
       swing: type==='door' ? 'Inswing, Left' : '',
@@ -4933,6 +5200,8 @@ function init(){
     if(window.updateWindowDefaultBadge) window.updateWindowDefaultBadge();
     startPeriodicRefreshCheck();
     startUnsyncedBannerTimer();
+    startConnectivityListeners();
+    startUnloadGuard();
     // Brand new device/browser storage (nothing to restore) and not in the middle of opening a
     // specific shared link - surface the plan picker instead of silently leaving this blank
     // Untitled Floor Plan as the working state. See showLandingChooser() above.

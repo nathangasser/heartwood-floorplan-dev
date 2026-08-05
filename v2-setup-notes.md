@@ -1063,6 +1063,292 @@ different windows and confirm both rings pulse in sync; drag on empty background
 select something in focus mode and confirm it's still centered in the now-smaller visible canvas
 strip, and that dragging a window near that strip's edge still auto-pans sensibly.
 
+## Round 10r - field-testing bug report: dropped edits + can't-delete issues - BUILT, NEEDS DEPLOY
+Nathan's field-testing report: "we're dropping edits to windows" (Service Level given as the
+example) and "I can't delete issues from windows. Once added it sticks around." Two separate root
+causes, both diagnosed by re-reading the actual merge/sync code fresh rather than guessing:
+
+1. **Issues couldn't be deleted - by design, not by bug.** `unionIssues`/`mergeKeyedMap` in
+   index.mjs union both sides' issue arrays together and nothing more - there was never a
+   mechanism to represent "this entry should go away." Clearing `o.issues` locally only ever won
+   until the next sync, which would union the old entries right back in from whatever the server
+   still had stored.
+
+   Fix: a new `o.issuesClearedAt` timestamp, set client-side the moment "Resolved (clear all)" is
+   confirmed (alongside `o.issues = []`). Lambda-side, `mergeKeyedMap` now takes the max of both
+   sides' `issuesClearedAt` (new `maxTimestamp` helper) and filters the unioned issues down to only
+   entries logged strictly after that mark - so a clear sticks across every future sync, but a
+   genuinely new issue logged after the clear (by anyone) still survives normally. Verified with a
+   Node simulation covering: clear removes the old entry with zero conflicts; a new issue logged
+   after the clear survives a later merge; two people adding different issues concurrently (no
+   clear involved) still both survive with zero conflicts, unchanged from before; a real conflict
+   on some other field doesn't block the clear from still applying on top. `issuesClearedAt` was
+   also added to `openingContentEqual`'s exclusion list (alongside `issues`) so a clear-only change
+   is recognized as the non-conflicting case it is, same as an issues-only change already was.
+
+   **Needs Lambda redeploy** - this half of the fix only takes effect once index.mjs is pushed.
+
+2. **Edits silently disappearing - a real race, no second device needed.** Root cause was in
+   `applySyncResult` (index.html): once a save's response comes back, it unconditionally
+   `Object.assign(o, merged)`s the server's confirmation onto the local opening for anything that
+   was part of that request's own payload. That's fine if nothing else happened in the meantime -
+   but if the same window got edited AGAIN locally while that first save was still in flight (easy
+   to hit solo, just editing fields quickly), the response landing would blindly overwrite that
+   newer edit with the older, now-stale server confirmation. No conflict, no toast, nothing to see
+   - it just quietly reverted. This is a gap the Round 10d "sent payload" fix didn't cover: 10d
+   protects against wrongful *deletion* of things added after a request was sent, but never checked
+   for wrongful *overwrite* of things edited again after a request was sent.
+
+   Fix: two new helpers, `deepEqualLocal` (order-independent deep equality, same job as index.mjs's
+   own `deepEqual`) and `openingMatchesSent(o, sent)` (same comparison, ignoring `photos` since
+   that field is deliberately never sent to or returned by the server). Before `applySyncResult`
+   fully applies a response to an opening/label that was part of the just-sent payload, it now
+   checks whether the local copy still matches exactly what was sent. If yes (the common case),
+   applies normally. If it's diverged - edited again mid-round-trip - only `lastEditedAt` advances
+   to the server's confirmed value; the rest of the object is left untouched, preserving the newer
+   edit so the next already-queued sync (syncQueuedWhileInFlight already serializes these) carries
+   it forward and matches cleanly against the now-correct baseline instead of falsely conflicting.
+   Verified with a standalone test of both helpers (identical objects match; diverged objects
+   don't; missing sent-record correctly reports no match; key-order-independent equality holds).
+
+   Frontend-only - no Lambda change needed for this half.
+
+Both `index.mjs` and the extracted `<script>` block from `index.html` syntax-check clean
+(`node --check`). Worth confirming on a real device once the Lambda is redeployed: log an issue,
+clear it, confirm it stays cleared after a reload and after another device/session syncs; edit a
+window's Service Level, then immediately edit something else on the same window before the first
+save could plausibly finish, and confirm both edits stick after sync settles.
+
+## Round 10s - Batch A: access & data-safety hardening (Lambda) - BUILT, NEEDS DEPLOY + CONFIG
+Prompted by an outside code review of index.mjs/index.html. Verified every claim against the
+actual code before acting on it (see chat for the full point-by-point check) - all of it held up.
+Grouped as one batch since it's all index.mjs and ships in a single redeploy. Nothing here touches
+the plan data shape, the merge/conflict logic, or the local-first save architecture - all additive
+checks layered on top of the existing design.
+
+1. **Any authenticated Google account could reach every plan.** The Lambda only ever checked that
+   an `email` claim existed, not who it belonged to. Fixed with an explicit authorization gate,
+   `isAllowedUser()`, checked right after the existing "are you signed in at all" check and before
+   any route runs. Configured via two new env vars - `ALLOWED_EMAILS` (comma-separated exact
+   addresses) and/or `ALLOWED_DOMAIN` (a single Workspace domain, matched as an exact `@domain`
+   suffix, not a loose substring - `@notheartwoodrestore.com` does NOT match `heartwoodrestore.com`,
+   verified). **Fails closed**: if neither var is set, every request gets a 403, on purpose - a
+   misconfigured deploy should be obvious immediately, not a silent open door. **This means the
+   app will reject everyone, including Nathan, until at least one of these two env vars is set on
+   the Lambda after this deploys** - see "needs from Nathan" below.
+
+2. **Photo links weren't scoped to their plan.** `getPlan` used to sign a view URL for every key in
+   a plan's stored `photos` array with zero check that the key actually belonged to that plan. New
+   `photoKeyBelongsToPlan(key, planId)` requires every key to start with `plans/{planId}/openings/`
+   before it's ever handed to `getSignedUrl` - anything else (a foreign key, a path-traversal
+   attempt) is silently dropped rather than signed. Verified against a same-plan key (passes), a
+   different-plan key (blocked), and a `../` traversal attempt (blocked).
+
+3. **Archiving a nonexistent plan created a broken phantom record.** DynamoDB's `UpdateItem`
+   creates the item if the key doesn't exist - `archivePlan` had no guard against that, so a typo'd
+   or already-gone planId silently created a record with nothing but `planId`/`archived`/edit
+   metadata. Added `ConditionExpression: attribute_exists(planId)`; a failed condition now reports
+   404 instead of quietly fabricating a record.
+
+4. **Upload-URL requests were unvalidated.** `getUploadUrl` now requires `planId`/`openingId` to
+   match a safe identifier pattern (blocks slashes, `..`, and anything else that could escape the
+   intended S3 key prefix - not a strict UUID check, since ids are generated in a couple different
+   formats client-side, verified against both `nextId()`-style and UUID-style ids), requires `kind`
+   to be exactly `"interior"` or `"exterior"`, and now checks the plan actually exists before
+   handing out a signed upload slot for it. **Deferred, not built:** genuinely enforcing a max
+   upload *byte size* server-side would mean switching from a presigned PUT to a presigned POST
+   with a size-range condition, which also changes how the browser performs the upload - bigger
+   change than fit this batch, noted for later if it becomes a real problem (an internal crew tool
+   uploading phone photos is a low-risk target for this specifically).
+
+5. **No cap on save payload size.** A save larger than roughly 350KB (comfortably under
+   DynamoDB's hard 400KB per-item limit) now gets a clean 413 before any parsing or DB work, instead
+   of an unbounded body eventually failing unpredictably at the database layer. Checked against the
+   raw body size, not the parsed object, so an oversized payload is rejected as cheaply as possible.
+
+6. **Plan list would eventually go silently incomplete.** `listPlans` was a single unpaginated
+   `Scan`, which DynamoDB caps at 1MB per call - past that point, plans would just stop appearing
+   in the list with no error or indication. Now loops over `LastEvaluatedKey` until the full table
+   is read, and uses a `ProjectionExpression` to fetch only the 7 fields the plans screen actually
+   displays instead of every full item (including the openings/labels data nobody needed for this
+   screen).
+
+7. **Photo URLs signed one at a time.** `getPlan` awaited each `getSignedUrl` call in a loop -
+   a plan with two dozen photos paid for two dozen sequential round-trips on every load. Now
+   `Promise.all`'d.
+
+8. **Internal error details leaked to the caller.** The catch-all handler returned `err.message`
+   straight to the client. Now logs full detail to CloudWatch (prefixed with the request id, so
+   it's greppable) and returns a generic "Server error" to the caller. Malformed JSON in a request
+   body now cleanly reports 400 instead of falling through to a misleading 500.
+
+All of the above verified with a standalone Node test (stubbed AWS SDK modules, since this sandbox
+has no network access to npm) covering: exact-email allow, case-insensitive match, domain match,
+domain-suffix-trick rejection, fail-closed-when-unconfigured, same-plan/different-plan/traversal
+photo keys, and safe-id accept/reject on both id formats actually used by the frontend. The
+existing merge-logic tests were re-run unchanged to confirm nothing in this batch touched that
+code path. `node --check` clean on both files.
+
+**Needs from Nathan before this is live:**
+- Redeploy index.mjs.
+- Set `ALLOWED_EMAILS` and/or `ALLOWED_DOMAIN` on the Lambda's environment variables **before or
+  immediately after** that deploy - until one is set, the app is unreachable for everyone (fails
+  closed, see above). This is deliberate, but worth knowing going in so it isn't mistaken for a
+  bug.
+
+No frontend changes in this batch - index.html is untouched, re-syntax-checked clean regardless.
+
+## Round 10t - Batch B: sync reliability - BUILT, NEEDS DEPLOY + ONE NEW ROUTE
+Prompted by a second round of outside review, this time on polling/sync behavior specifically.
+Same approach as Round 10s - verified every claim against the real code first (all held up) before
+building. Four independent pieces:
+
+1. **"Keep my changes" left per-item baselines stale.** Diagnosed and fixed - see the code comment
+   on `handleSaveConflict` for the full mechanism. Short version: that button used to only update
+   `state.structuralLastEditedAt`, never the individual opening/label baselines that the same
+   conflicted save had already gotten fresh values for server-side (the per-item merge always runs
+   alongside a structural conflict, per computeSave). Left stale, those could cause a false "someone
+   else changed this too" conflict on a later retry, on an opening nobody actually double-touched.
+   Fixed by routing "Keep my changes" through `applySyncResult` - the same reconciliation a normal
+   200 already uses - instead of hand-rolling a partial version of it. Verified with two simulated
+   scenarios: baselines advance correctly and content is preserved on a normal resolve, and the
+   Round 10r divergence protection (an opening edited again while the request was in flight) still
+   holds on this path too.
+
+2. **No automatic retry after a real failure.** A failed save (network error, non-2xx, not a 409 -
+   409 already correctly routes to the conflict dialog instead) used to just sit there until another
+   edit happened or someone tapped the indicator. Now retries automatically at roughly 5s/15s/30s/
+   60s/120s, holding at 120s for as long as failures continue, each with +/-20% random jitter so
+   multiple crew devices losing signal together don't all retry in the same instant. Skips arming a
+   timer if a fresh edit already queued its own immediate retry (no point running both). Cleared on
+   genuine success or when connectivity actually returns (see below) rather than waiting out
+   whatever's left of the countdown.
+
+3. **No awareness of the browser going on/offline.** Added `online`/`offline` listeners - offline
+   cancels any pending retry timer (nothing to retry against), online immediately retries a stuck
+   save instead of waiting out the backoff. The app coming back into view (tab switch, phone wake)
+   also now triggers an immediate retry attempt if there's unflushed work and the browser thinks
+   it's online, on top of the existing "check for a newer version" that already happened here.
+
+4. **The 5-minute background poll pulled the entire plan.** `checkForNewerVersion` used to call the
+   same full `GET /plans/{planId}` a real plan load uses - every field, plus a freshly signed URL
+   for every photo - just to compare one timestamp. New `GET /plans/{planId}/revision` route
+   (Lambda: `getPlanRevision`) returns only `planId`/`lastEditedAt`/`structuralLastEditedAt`/
+   `lastEditedBy` via a `ProjectionExpression`, so a routine "did anything change" check is cheap.
+   The full plan is only fetched afterward, and only when the answer is yes. **Degrades safely if
+   the new route isn't live yet**: a non-ok response (including a 404 before the route exists) falls
+   back to the exact old full-plan check, so nothing regresses in the meantime - it'll just make two
+   requests per poll instead of one until the route is added, not fail outright.
+
+Also worth noting: the reviewer's suggestion to "never discard the IndexedDB copy until the server
+confirms" is already true today (local save happens first, unconditionally, on every edit,
+regardless of cloud outcome) - no change needed there, just confirmed.
+
+`node --check` clean on both files. Retry/backoff logic isn't independently unit-testable the way
+the merge logic is (it's timer-driven, not pure), so it got a careful read-through instead - flagged
+as one of the things worth specifically watching on a real device (see checklist below).
+
+**Needs from Nathan:**
+- Redeploy index.mjs (same deploy as anything else pending - this doesn't need its own).
+- Add a new API Gateway route, `GET /plans/{planId}/revision`, pointing at the same Lambda with the
+  same JWT authorizer as the existing `GET /plans/{planId}` route - same steps you used to set that
+  one up originally. Not required for anything else in this batch to work; only the poll-efficiency
+  piece depends on it, and it degrades gracefully without it.
+
+**Worth confirming on a real device:** put the phone in airplane mode mid-edit, confirm the retry
+countdown kicks in when you reconnect (should fire immediately, not wait out the timer); force a
+structural conflict between two devices, choose "keep mine," and confirm a subsequent edit to an
+untouched window doesn't report a spurious conflict; leave the tab backgrounded for a few minutes
+with an unsynced edit, then bring it back to front and confirm it retries right away instead of
+waiting for the next 5-minute tick.
+
+## Round 10u - Batch D: issue log UI + per-issue delete - BUILT, NEEDS DEPLOY
+Two requests: reorder the issue log entry layout (message above who/when, not below), and add a
+per-issue "x" so one issue can be deleted at a time instead of only all-or-nothing.
+
+1. **Layout.** Each entry's message now renders above its byline. Small CSS/DOM reorder only.
+
+2. **Per-issue delete.** The all-or-nothing "Resolved (clear all)" from Round 10r used a single
+   timestamp watermark (`issuesClearedAt`) that only knew how to say "everything before now is
+   gone" - it had no way to name one specific entry. Since that mechanism was built but never
+   actually deployed, swapped it out entirely rather than running two systems side by side (Nathan
+   signed off on this before it was built):
+   - Every new issue now gets a stable `id` at creation (`nextId()`), alongside the existing
+     `time`/`user`/`message`.
+   - A new `deletedIssueIds` array on each opening is a grow-only tombstone set - same pattern
+     already used for deleted openings/labels elsewhere in this app, just scoped to individual
+     issue entries. Deleting an issue (the new x button, or "Resolved" clearing all of them one by
+     one under the hood) adds its identity to that list; the Lambda unions both sides'
+     `deletedIssueIds` and filters anything in that set out of the unioned issues.
+   - **Old issues already in production, logged before this shipped, never got an id.** Rather than
+     needing a migration pass, both the Lambda's `issueKey()` and the frontend's matching
+     `issueKeyLocal()` fall back to the same `(time, user, message)` tuple `unionIssues` has always
+     deduped by whenever `id` is missing - so a pre-existing issue is just as deletable as a new
+     one, verified directly (see below).
+   - `openingContentEqual`'s exclusion list swapped from `["issues", "issuesClearedAt"]` to
+     `["issues", "deletedIssueIds"]` so a delete-only change still counts as the "never a conflict"
+     case, same as an issues-only change already did.
+
+Verified with five Node scenarios against the real merge function: delete one issue by id (the
+other survives, zero conflicts), clear-all via the same mechanism, a new issue logged after a
+clear still survives a later merge, a legacy no-id issue deleted through its fallback key, and two
+people deleting *different* issues concurrently (both stick, zero conflicts - this one matters
+because it's the exact situation the old all-or-nothing button couldn't represent at all). Also
+directly confirmed the frontend's `issueKeyLocal` and the Lambda's `issueKey` produce identical
+output for both an id-based entry and a legacy no-id entry - if these two ever drift apart, a
+delete computed client-side wouldn't match what the server is filtering against, so this was worth
+checking explicitly rather than assuming. `node --check` clean on both files.
+
+**Needs from Nathan:** redeploy index.mjs (same deploy as anything else pending).
+
+## Round 10v - Batch C: sync status UX polish - BUILT, frontend only
+Last piece of the queue from the two outside reviews - no correctness bug here, just making the
+existing states easier to read at a glance, per the reviewer's four-state framing.
+
+1. **Friendlier, more specific wording.** "Syncing…" -> "Saving to team…", "Synced" -> "Saved to
+   team" (adds "- review needed" when a merge conflict needs a look, same as before), "Conflict -
+   action needed" -> "Conflict - choose a version".
+
+2. **Elapsed-time framing when work hasn't reached the team.** New `updateCloudStatusText()`
+   computes "Saved on this device - last synced 3m ago" (or "Offline - saved on this device - ..."
+   when `navigator.onLine` is false, or "not yet synced this session" if it never has been) any time
+   there's unsynced work and nothing else is actively happening. Two triggers: immediately after a
+   failed save (so this shows up right away, not after the old 10-minute wait for the big banner),
+   and on the existing 30-second banner tick (so "3m ago" doesn't go stale if nobody touches
+   anything for a while). Guarded against overwriting "Saving to team…" or "Conflict - choose a
+   version" while either of those is the real current state (`syncInFlight` / new `conflictPending`
+   flag, set true when the conflict dialog opens and cleared when either option is chosen).
+
+3. **Close/navigate-away warning.** New `beforeunload` listener prompts if there's unsynced work
+   when closing the tab or navigating away. Browsers ignore custom message text in this dialog for
+   security reasons and show their own generic wording - `returnValue` still has to be set to
+   trigger the prompt at all, which is what's actually happening here. Plans are opened via a real
+   page navigation in this app (not an in-page swap), so this also covers "switching plans" with
+   unsynced work, not just closing the tab entirely.
+
+The big 10-minute banner and its wording are unchanged - it's still the "you've really been out of
+touch a while" escalation; the small indicator now carries the immediate signal the reviewer asked
+for. Verified `formatElapsed`/`updateCloudStatusText` directly (six cases: no-op when already
+synced, never-synced-this-session wording, elapsed-time wording, offline prefix, and both guard
+flags correctly blocking an overwrite). `node --check` clean.
+
+## This session's full queue, start to finish
+Two rounds of outside code review (access/data-safety, then sync/polling specifically) plus one
+UI request, worked through as four batches - Round 10s (Batch A), 10t (Batch B), 10u (Batch D),
+10v (Batch C) above, in that build order. Every review claim was verified against the real code
+before anything was built on top of it - see each round's section for the specific checks run.
+
+**Still needed from Nathan, all in one pass:**
+1. Redeploy `index.mjs` (covers Batches A, B, and D - one deploy).
+2. Set `ALLOWED_DOMAIN=heartwoodrestore.com` on the Lambda's environment variables (Batch A -
+   the app rejects everyone until this is set, see Round 10s).
+3. Add a new API Gateway route, `GET /plans/{planId}/revision`, pointing at the same Lambda with
+   the same JWT authorizer as the existing `GET /plans/{planId}` route (Batch B's poll-efficiency
+   piece only - everything else in this queue works without it, and this one degrades gracefully
+   if skipped for now).
+
+No frontend deploy step needed beyond whatever Nathan's normal process is for index.html.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).
