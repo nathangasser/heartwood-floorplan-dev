@@ -1349,6 +1349,55 @@ before anything was built on top of it - see each round's section for the specif
 
 No frontend deploy step needed beyond whatever Nathan's normal process is for index.html.
 
+## Round 10w - six small tweaks - BUILT, frontend only
+Confirmed the two visual ones (DH, Slider) with Nathan via mockups before touching the rendering
+code, since prose descriptions of plan-view symbols are easy to build the wrong interpretation of.
+
+1. **Double Hung - stacked, not side-by-side.** Old symbol was two lines offset +/-4 from the wall
+   centerline plus a perpendicular tick at the midpoint (the meeting rail) - visually that tick
+   read as a seam splitting the window into two side-by-side halves. New symbol: three full-width
+   lines, evenly spaced, centered on the wall, no center tick. The opening's whole drawn depth
+   (`half`, which the cutout polygon and jamb end ticks both already read from) doubles specifically
+   for Double Hung windows so the three lines have room - confirmed this stays centered and the
+   outer lines stay safely inside the jamb ticks with a Node check of the actual geometry.
+
+2. **New window type: Slider.** Added to `WINDOW_OPERATIONS`, the default-window-operation picker
+   (badge abbreviation "SLD"), and gets its own plan symbol: two rectangle outlines, one from the
+   start jamb to the opening's true midpoint, the other from the midpoint to the end jamb, each
+   touching the wall centerline at that shared midpoint (verified directly - both rectangles'
+   point lists contain the exact same corner coordinate) so together they read as one continuous
+   line straight across, with one sash "in" and one "out" above/below it. Same depth as every
+   other window type except Double Hung - no doubling here.
+
+3. **Flip Orientation button.** New `o.sliderFlipped` boolean, toggled from a button in the inline
+   panel (shown only for Slider windows, in the same slot the door/casement swing controls already
+   use). Flipping just negates which side each rectangle's outer edge points toward - verified the
+   flipped geometry swaps sides correctly while the shared centerline corner stays put.
+
+4. **Two new Service Level options**: "New Sash" and "New Unit (Frame and Sash)", added to
+   `SERVICE_LEVEL_OPTIONS` ahead of "Other" (kept last, matching every other options list in the
+   app).
+
+5. **New "Service Description" column**, a plain text field, added to `presetColumnDefs()`
+   immediately after Service Level. No special-case code needed - schedule cells, the inline
+   panel, and CSV export all read columns generically off `col.key`, so a new text column just
+   works once it's in the list.
+
+6. **Not in Scope moved to the far right** of the schedule table, now to the right of the Add
+   Column button instead of to its left - header and row cells reordered together, column count
+   unchanged so nothing else shifts.
+
+7. **Completed rows get a light green tint.** New `.rowCompleted` rule, scoped with `#sched` to
+   outrank the existing `td[contenteditable]` background rule (same specificity, later in the
+   stylesheet wins) so it actually shows through on every cell in the row, not just the
+   non-editable ones. Not-in-scope's gray tint still wins if a row is somehow both (its rule uses
+   `!important`), which is the right call.
+
+Frontend only, `node --check` clean. Worth a look on a real device: add a Double Hung and a Slider
+side by side and confirm they read clearly at normal zoom (not just close up); flip a slider a
+couple times and confirm the drawing updates immediately; mark a row complete and confirm the tint
+shows even in edited text cells, not just the checkbox cell.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

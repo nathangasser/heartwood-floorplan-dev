@@ -183,6 +183,11 @@
   .rowType-door{box-shadow:inset 3px 0 0 var(--door);}
   .rowNoWork{box-shadow:inset 3px 0 0 #9a9488 !important;}
   .rowNoWork td{background:var(--panel) !important; color:var(--muted);}
+  /* Round 10w: light green tint across the whole row once a window/door is marked Completed -
+     #sched prefix matches the specificity of the td[contenteditable] rule above so this actually
+     wins over it (contenteditable cells are most of a row); rowNoWork's !important still takes
+     priority if a row is somehow both, which is the right call - out of scope beats complete. */
+  #sched .rowCompleted td{background:#e6f4ea;}
   .levelHeaderRow td{
     background:var(--panel); font-weight:800; font-size:13px; color:var(--ink);
     border:1px solid var(--line); padding:8px 10px; position:sticky; top:37px;
@@ -409,10 +414,10 @@ var API_BASE = 'https://rc57geq62e.execute-api.us-east-1.amazonaws.com';
 
 function inchesToUnits(inches){ return inches/30*DEFAULT_OPENING_W; }
 
-var WINDOW_OPERATIONS = ['Double Hung','Casement','French Pair','Fixed','Hopper','Other'];
+var WINDOW_OPERATIONS = ['Double Hung','Casement','Slider','French Pair','Fixed','Hopper','Other'];
 var DOOR_OPERATIONS = ['Door','French Pair','Fixed','Sidelite'];
 var GLASS_OPTIONS = ['Clear','Wavy','Laminated','Leaded','Privacy','Stained Glass','Other'];
-var SERVICE_LEVEL_OPTIONS = ['Rerope','Tuneup','Restoration','Repair','Glaze only','Glass only','Other'];
+var SERVICE_LEVEL_OPTIONS = ['Rerope','Tuneup','Restoration','Repair','Glaze only','Glass only','New Sash','New Unit (Frame and Sash)','Other'];
 var SWING_OPTIONS = [
   {hingeSide:'p1', swingOut:false, label:'Inswing, Left'},
   {hingeSide:'p2', swingOut:false, label:'Inswing, Right'},
@@ -448,6 +453,7 @@ function presetColumnDefs(){
     {key:'hardware', label:'Hardware', kind:'text', defaultVisible:false},
     {key:'mfgMeasurements', label:'Manufacturing Measurements', kind:'text', defaultVisible:false},
     {key:'serviceLevel', label:'Service Level', kind:'dropdown', defaultVisible:true, optionsFor:function(){ return SERVICE_LEVEL_OPTIONS; }},
+    {key:'serviceDescription', label:'Service Description', kind:'text', defaultVisible:true},
     {key:'repairDetails', label:'Repair Details', kind:'text', defaultVisible:false},
     {key:'notes', label:'Notes', kind:'text', defaultVisible:true}
   ];
@@ -2440,6 +2446,13 @@ function buildSvg(target, lvl, opts){
     var g = svgEl('g', {'data-role':'opening','data-id':o.id,'data-type':o.type});
 
     var half = WALL_T/2+2;
+    // Round 10w: Double Hung's plan symbol needs a deeper footprint than every other window
+    // type - two full sash bands stacked front-to-back instead of one - so the whole opening's
+    // depth doubles here specifically. The cutout polygon and jamb end ticks below both read off
+    // this same `half`, so widening it here is all that's needed to make both follow along, and
+    // it's still centered on the wall either way since this just scales the +/- offset used
+    // throughout. Every other operation (including the new Slider) keeps the original depth.
+    if(o.type==='window' && o.operation==='Double Hung') half = half*2;
     var rectPts = [
       {x:p1.x+nx*half, y:p1.y+ny*half},
       {x:p2.x+nx*half, y:p2.y+ny*half},
@@ -2458,20 +2471,58 @@ function buildSvg(target, lvl, opts){
     var badgeNormal = outN;
 
     if(o.type==='window'){
-      [-4,4].forEach(function(off){
-        g.appendChild(svgEl('line',{
-          x1:p1.x+nx*off, y1:p1.y+ny*off, x2:p2.x+nx*off, y2:p2.y+ny*off,
-          stroke:typeColor, 'stroke-width':4, 'stroke-linecap':'round'
-        }));
-      });
+      if(o.operation==='Double Hung'){
+        // Three full-width lines, evenly spaced across the doubled depth, centered on the wall -
+        // replaces the old two-line-plus-center-tick symbol, which read as two sashes side by
+        // side instead of two sashes stacked one behind the other (Round 10w).
+        var dhOff = half*0.55;
+        [-dhOff, 0, dhOff].forEach(function(off){
+          g.appendChild(svgEl('line',{
+            x1:p1.x+nx*off, y1:p1.y+ny*off, x2:p2.x+nx*off, y2:p2.y+ny*off,
+            stroke:typeColor, 'stroke-width':4, 'stroke-linecap':'round'
+          }));
+        });
+      } else if(o.operation==='Slider'){
+        // Two rectangles, half-width each, corners touching at the centerline (Round 10w). The
+        // left rectangle (p1 to the midpoint) sits on one side, the right rectangle (midpoint to
+        // p2) sits on the other - both touch the centerline exactly at the midpoint, so together
+        // they read as one continuous line straight across, with "one sash in, one sash out"
+        // above/below it. o.sliderFlipped (the inline panel's Flip Orientation button) just
+        // negates which side each rectangle's outer edge points toward.
+        var pMid = pointAt(e, o.offset+o.width/2);
+        var sliderDepth = 4;
+        var flip = o.sliderFlipped ? -1 : 1;
+        var leftPts = [
+          {x:p1.x, y:p1.y},
+          {x:pMid.x, y:pMid.y},
+          {x:pMid.x-nx*sliderDepth*flip, y:pMid.y-ny*sliderDepth*flip},
+          {x:p1.x-nx*sliderDepth*flip, y:p1.y-ny*sliderDepth*flip}
+        ];
+        var rightPts = [
+          {x:pMid.x, y:pMid.y},
+          {x:p2.x, y:p2.y},
+          {x:p2.x+nx*sliderDepth*flip, y:p2.y+ny*sliderDepth*flip},
+          {x:pMid.x+nx*sliderDepth*flip, y:pMid.y+ny*sliderDepth*flip}
+        ];
+        [leftPts, rightPts].forEach(function(pts){
+          g.appendChild(svgEl('polygon',{
+            points:pts.map(function(p){return p.x+','+p.y;}).join(' '),
+            fill:'none', stroke:typeColor, 'stroke-width':3
+          }));
+        });
+      } else {
+        // Casement, Fixed, Hopper, French Pair, and Other all share this plain two-pane symbol.
+        [-4,4].forEach(function(off){
+          g.appendChild(svgEl('line',{
+            x1:p1.x+nx*off, y1:p1.y+ny*off, x2:p2.x+nx*off, y2:p2.y+ny*off,
+            stroke:typeColor, 'stroke-width':4, 'stroke-linecap':'round'
+          }));
+        });
+      }
       [p1,p2].forEach(function(p){
         g.appendChild(svgEl('line',{x1:p.x-nx*half,y1:p.y-ny*half,x2:p.x+nx*half,y2:p.y+ny*half,stroke:'var(--wall)','stroke-width':3}));
       });
-      // Fixed, Hopper, Awning, French Pair, and Other all render like a plain fixed window - no clutter.
-      if(o.operation==='Double Hung'){
-        var mid = {x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2};
-        g.appendChild(svgEl('line',{x1:mid.x-nx*5,y1:mid.y-ny*5,x2:mid.x+nx*5,y2:mid.y+ny*5,stroke:typeColor,'stroke-width':2.5}));
-      } else if(o.operation==='Casement'){
+      if(o.operation==='Casement'){
         g.appendChild(svgEl('line',{x1:p1.x-nx*4,y1:p1.y-ny*4,x2:p2.x+nx*4,y2:p2.y+ny*4,stroke:typeColor,'stroke-width':2, 'stroke-dasharray':'3 2'}));
       }
     } else if(o.operation==='Fixed' || o.operation==='Sidelite'){
@@ -2704,12 +2755,6 @@ function buildSchedule(){
   htr.appendChild(photosTh);
   var jumpTh = document.createElement('th'); jumpTh.style.width='52px';
   htr.appendChild(jumpTh);
-  // Fixed final data column, not part of the preset/custom column system - always present,
-  // never hideable/reorderable. This is the one place "not in scope" gets set/cleared from the
-  // schedule; unchecking it here is exactly the same action as tapping "Resume Work" in focus
-  // mode (see the inline panel's noWorkBtn), since both just flip the same o.noWork flag.
-  var scopeTh = document.createElement('th'); scopeTh.textContent='Not in Scope'; scopeTh.style.width='70px';
-  htr.appendChild(scopeTh);
   var addColTh = document.createElement('th'); addColTh.style.width='46px';
   var addColBtn = document.createElement('button');
   addColBtn.type='button'; addColBtn.className='addColHeaderBtn'; addColBtn.textContent='+';
@@ -2721,6 +2766,14 @@ function buildSchedule(){
   });
   addColTh.appendChild(addColBtn);
   htr.appendChild(addColTh);
+  // Fixed final data column, not part of the preset/custom column system - always present,
+  // never hideable/reorderable. This is the one place "not in scope" gets set/cleared from the
+  // schedule; unchecking it here is exactly the same action as tapping "Resume Work" in focus
+  // mode (see the inline panel's noWorkBtn), since both just flip the same o.noWork flag. Placed
+  // last (Round 10w), to the right of Add Column, so it stays the furthest-right column regardless
+  // of how many custom columns get added.
+  var scopeTh = document.createElement('th'); scopeTh.textContent='Not in Scope'; scopeTh.style.width='70px';
+  htr.appendChild(scopeTh);
   thead.appendChild(htr);
   table.appendChild(thead);
 
@@ -2919,6 +2972,8 @@ function buildSchedule(){
       }
       tr.appendChild(jumpTd);
 
+      tr.appendChild(document.createElement('td')); // aligns under the Add Column header
+
       var scopeTd = document.createElement('td');
       scopeTd.style.textAlign = 'center';
       var scopeChk = document.createElement('input');
@@ -2932,7 +2987,6 @@ function buildSchedule(){
       scopeTd.appendChild(scopeChk);
       tr.appendChild(scopeTd);
 
-      tr.appendChild(document.createElement('td'));
       tbody.appendChild(tr);
     });
   });
@@ -3048,6 +3102,7 @@ function addOpening(type, wallKey, along, wallLen){
     operation: operation,
     hingeSide: type==='door' ? 'p1' : undefined,
     swingOut: type==='door' ? false : undefined,
+    sliderFlipped: type==='window' ? false : undefined,
     noWork: false,
     photos: {interior:null, exterior:null},
     photoKeys: {interior:null, exterior:null},
@@ -3058,7 +3113,7 @@ function addOpening(type, wallKey, along, wallLen){
       label: shortLabel, type: typeName, operation: operation,
       swing: type==='door' ? 'Inswing, Left' : '',
       width:'', height:'', lites:'', screen:'', glass:'', glassNotes:'',
-      hardware:'', mfgMeasurements:'', serviceLevel:'', repairDetails:'', notes:''
+      hardware:'', mfgMeasurements:'', serviceLevel:'', serviceDescription:'', repairDetails:'', notes:''
     }
   };
   lvl.openings.push(o);
@@ -3374,12 +3429,29 @@ function updateInlinePanel(){
   allColumnsForDisplay().forEach(function(col){
     var showSwingForWindow = col.key==='swing' && o.type==='window' && o.operation==='Casement';
     var showSwingForDoor = col.key==='swing' && o.type==='door';
-    if(col.key==='swing' && !showSwingForWindow && !showSwingForDoor) return;
+    // Round 10w - piggybacks on the same 'swing' column slot the door/casement controls already
+    // use (same reasoning: this is per-operation configuration, not a real schedule field, and it
+    // should follow that column's show/hide setting the same way those two already do).
+    var showFlipForSlider = col.key==='swing' && o.type==='window' && o.operation==='Slider';
+    if(col.key==='swing' && !showSwingForWindow && !showSwingForDoor && !showFlipForSlider) return;
 
     var row = document.createElement('div'); row.className='ipRow';
-    var lab = document.createElement('label'); lab.textContent = col.label; row.appendChild(lab);
+    var lab = document.createElement('label');
+    lab.textContent = showFlipForSlider ? 'Orientation' : col.label;
+    row.appendChild(lab);
 
-    if(showSwingForDoor){
+    if(showFlipForSlider){
+      var flipBtn = document.createElement('button');
+      flipBtn.type='button'; flipBtn.className='ipActionBtn'; flipBtn.style.width='100%';
+      flipBtn.disabled = !!o.noWork;
+      flipBtn.textContent = 'Flip Orientation';
+      flipBtn.addEventListener('click', function(){
+        o.sliderFlipped = !o.sliderFlipped;
+        refreshSvg(); scheduleSave();
+      });
+      row.appendChild(flipBtn);
+
+    } else if(showSwingForDoor){
       var seg2 = document.createElement('div'); seg2.className='ipSeg'; seg2.style.flexWrap='wrap';
       SWING_OPTIONS.forEach(function(opt){
         var b = document.createElement('button');
@@ -4799,7 +4871,7 @@ function wireUp(){
     var badge = document.getElementById('windowDefaultBadge');
     if(!badge) return;
     var op = state.defaultWindowOperation || 'Double Hung';
-    badge.textContent = op==='Double Hung' ? 'DH' : (op==='Casement' ? 'CSMT' : 'FIX');
+    badge.textContent = op==='Double Hung' ? 'DH' : (op==='Casement' ? 'CSMT' : (op==='Slider' ? 'SLD' : 'FIX'));
   }
   window.updateWindowDefaultBadge = updateWindowDefaultBadge;
 
@@ -4813,6 +4885,7 @@ function wireUp(){
     showMenuDialog('Default window style', [
       { label: 'Double Hung', onClick: function(){ setDefaultWindowOperation('Double Hung'); } },
       { label: 'Casement', onClick: function(){ setDefaultWindowOperation('Casement'); } },
+      { label: 'Slider', onClick: function(){ setDefaultWindowOperation('Slider'); } },
       { label: 'Fixed', onClick: function(){ setDefaultWindowOperation('Fixed'); } }
     ]);
   }
