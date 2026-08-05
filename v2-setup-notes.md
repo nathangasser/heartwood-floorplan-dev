@@ -1451,6 +1451,27 @@ Round 10x, but that still read as fairly dark next to the message. Now a dedicat
 
 `node --check` clean. Frontend only.
 
+## Round 10z - In-progress badge recolored to amber with opacity gradient - BUILT
+The orange "in progress %" badge read too close to the red issues badge - deceiving at a glance.
+Discussed options with Nathan via mockups (color choices, then a black-vs-white text follow-up)
+before touching code, per the usual pattern for ambiguous visual changes. Landed on: Amber
+(#f2a900), black text throughout, and the badge gets more solid as progress increases rather than
+staying flat.
+
+New `--inprogress:#f2a900` CSS variable added in `:root` (and mirrored into the duplicate
+print/export style string, since that one doesn't inherit from the page stylesheet). Badge fill
+now reads `var(--inprogress)` instead of `var(--accent)` for the in-progress case only - `completed`
+(green check) and issues-only (white dots) badges are untouched.
+
+Opacity gradient via a small lookup, `fill-opacity` on the status circle: 25%->0.4, 50%->0.6,
+75%->0.8, 90%->1 (full color). Percentage text switched from white to `var(--ink)` (near-black) for
+the in-progress case specifically - Nathan confirmed black throughout rather than switching to white
+at higher opacity/percentage steps, overriding my legibility concern.
+
+Verified the opacity lookup and color/text branching in isolation via Node (all four percentages
+map correctly, completed/issues-only paths unaffected). `node --check` clean on the extracted
+script block. Frontend only - no Lambda changes.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

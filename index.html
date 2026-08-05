@@ -12,6 +12,7 @@
     --wall:#20242c;
     --accent:#ff5a1f;
     --accent-ink:#ffffff;
+    --inprogress:#f2a900;
     --window:#0e6fc4;
     --door:#8a5a2b;
     --line:#d8d3c4;
@@ -2661,12 +2662,17 @@ function buildSvg(target, lvl, opts){
           style:'transform-origin:'+statusCenter.x+'px '+statusCenter.y+'px; animation-delay:'+pulseDelay+'ms;'
         }));
       }
-      var mainColor = completed ? 'var(--success)' : inProgressPct ? 'var(--accent)' : 'var(--danger)';
-      statusBadge.appendChild(svgEl('circle',{cx:statusCenter.x, cy:statusCenter.y, r:STATUS_R, fill:mainColor, stroke:'#fff','stroke-width':2}));
+      var mainColor = completed ? 'var(--success)' : inProgressPct ? 'var(--inprogress)' : 'var(--danger)';
+      var IN_PROGRESS_OPACITY = {'25%':0.4, '50%':0.6, '75%':0.8, '90%':1};
+      var mainCircleAttrs = {cx:statusCenter.x, cy:statusCenter.y, r:STATUS_R, fill:mainColor, stroke:'#fff','stroke-width':2};
+      if(inProgressPct && IN_PROGRESS_OPACITY[inProgressPct] != null){
+        mainCircleAttrs['fill-opacity'] = IN_PROGRESS_OPACITY[inProgressPct];
+      }
+      statusBadge.appendChild(svgEl('circle',mainCircleAttrs));
       if(completed){
         statusBadge.appendChild(svgEl('path',{d:checkmarkPathD(statusCenter.x, statusCenter.y, 5.5), stroke:'#fff','stroke-width':2.5, fill:'none','stroke-linecap':'round','stroke-linejoin':'round'}));
       } else if(inProgressPct){
-        var pctTxt = svgEl('text',{x:statusCenter.x, y:statusCenter.y+3.5, 'text-anchor':'middle','font-size':10,'font-weight':800,fill:'#fff'});
+        var pctTxt = svgEl('text',{x:statusCenter.x, y:statusCenter.y+3.5, 'text-anchor':'middle','font-size':10,'font-weight':800,fill:'var(--ink)'});
         pctTxt.textContent = String(inProgressPct).replace('%','');
         statusBadge.appendChild(pctTxt);
       } else {
@@ -4336,7 +4342,7 @@ function svgToPngDataUrl(lvl, scale){
     svgElTmp.setAttribute('xmlns', svgNS);
     buildSvg(svgElTmp, lvl, {printMode:true});
     var styleTag = document.createElementNS(svgNS,'style');
-    styleTag.textContent = ':root{--wall:#20242c;--paper:#ffffff;--accent:#ff5a1f;--window:#0e6fc4;--door:#8a5a2b;--line:#d8d3c4;--panel:#f6f4ee;--muted:#4b5058;--danger:#c62828;}';
+    styleTag.textContent = ':root{--wall:#20242c;--paper:#ffffff;--accent:#ff5a1f;--inprogress:#f2a900;--window:#0e6fc4;--door:#8a5a2b;--line:#d8d3c4;--panel:#f6f4ee;--muted:#4b5058;--danger:#c62828;}';
     svgElTmp.insertBefore(styleTag, svgElTmp.firstChild);
     var vb = svgElTmp.getAttribute('viewBox').split(' ').map(Number);
     var w = vb[2], h = vb[3];
