@@ -2084,6 +2084,21 @@ function showPromptDialog(opts){
   setTimeout(function(){ input.focus(); input.select(); }, 30);
 }
 
+// Round 10x - display-only helpers for the issue log. Neither changes what's actually stored
+// (entry.user/entry.time stay exactly as recorded) - both just format the value shown in the
+// dialog. Everyone on the crew signs in with the same @heartwoodrestore.com address, so showing
+// it on every single line added nothing but visual noise; stripping it here (not at write time)
+// keeps the full address available in the data if it's ever needed later.
+function shortIssueUser(email){
+  return (email || 'Unknown').replace(/@heartwoodrestore\.com$/i, '');
+}
+function shortIssueTime(iso){
+  if(!iso) return '';
+  var d = new Date(iso);
+  if(isNaN(d.getTime())) return '';
+  return d.toLocaleDateString() + ', ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+}
+
 // Round 10u: an issue entry's identity for union/delete purposes - see the matching issueKey() in
 // index.mjs, this must compute the exact same thing. Entries created after this shipped carry a
 // real `id` (assigned at creation, below). Older entries already stored from before this existed
@@ -2140,8 +2155,10 @@ function showIssueLogDialog(openingId){
       msg.style.fontSize='14px'; msg.style.wordBreak='break-word';
       msg.textContent = entry.message;
       var meta = document.createElement('div');
-      meta.style.fontSize='11px'; meta.style.fontWeight='700'; meta.style.color='var(--muted)'; meta.style.marginTop='2px';
-      meta.textContent = (entry.user||'Unknown') + ' · ' + (entry.time ? new Date(entry.time).toLocaleString() : '');
+      // Round 10x: was bold - even in --muted gray, bold at this size still pulled the eye before
+      // the message itself. Plain weight lets it actually recede the way gray text is supposed to.
+      meta.style.fontSize='11px'; meta.style.fontWeight='400'; meta.style.color='var(--muted)'; meta.style.marginTop='2px';
+      meta.textContent = shortIssueUser(entry.user) + ' · ' + shortIssueTime(entry.time);
       body.appendChild(msg); body.appendChild(meta);
 
       var delBtn = document.createElement('button');
@@ -2446,13 +2463,13 @@ function buildSvg(target, lvl, opts){
     var g = svgEl('g', {'data-role':'opening','data-id':o.id,'data-type':o.type});
 
     var half = WALL_T/2+2;
-    // Round 10w: Double Hung's plan symbol needs a deeper footprint than every other window
-    // type - two full sash bands stacked front-to-back instead of one - so the whole opening's
-    // depth doubles here specifically. The cutout polygon and jamb end ticks below both read off
-    // this same `half`, so widening it here is all that's needed to make both follow along, and
-    // it's still centered on the wall either way since this just scales the +/- offset used
-    // throughout. Every other operation (including the new Slider) keeps the original depth.
-    if(o.type==='window' && o.operation==='Double Hung') half = half*2;
+    // Round 10x fix: Round 10w doubled `half` for Double Hung to give the 3-line symbol room -
+    // but the cutout polygon and jamb end ticks read off that same `half`, so doubling it also
+    // pushed the black jamb edges past the wall's actual interior/exterior faces, which looked
+    // wrong (every other window type's jamb ticks correctly stop right at the wall face). `half`
+    // now stays the same for every opening type - the 3 Double Hung lines below fit their spacing
+    // within this original footprint instead, so the "stacked" read comes from the line pattern
+    // itself, not from the window visually poking past the wall it's set into.
     var rectPts = [
       {x:p1.x+nx*half, y:p1.y+ny*half},
       {x:p2.x+nx*half, y:p2.y+ny*half},
@@ -2472,9 +2489,12 @@ function buildSvg(target, lvl, opts){
 
     if(o.type==='window'){
       if(o.operation==='Double Hung'){
-        // Three full-width lines, evenly spaced across the doubled depth, centered on the wall -
-        // replaces the old two-line-plus-center-tick symbol, which read as two sashes side by
-        // side instead of two sashes stacked one behind the other (Round 10w).
+        // Three full-width lines, evenly spaced, centered on the wall - replaces the old
+        // two-line-plus-center-tick symbol, which read as two sashes side by side instead of two
+        // sashes stacked one behind the other (Round 10w). Kept within the same depth every other
+        // window type uses (Round 10x fix - an earlier version doubled `half` itself for this,
+        // which pushed the jamb ticks past the wall face; the "stacked" look now comes purely
+        // from the 3-line spacing, not from widening the opening's footprint).
         var dhOff = half*0.55;
         [-dhOff, 0, dhOff].forEach(function(off){
           g.appendChild(svgEl('line',{
@@ -2798,7 +2818,9 @@ function buildSchedule(){
 
     rows.forEach(function(o){
       var tr = document.createElement('tr');
-      tr.className = 'rowType-'+o.type + (o.noWork ? ' rowNoWork' : '');
+      // Round 10x fix: the CSS for this (.rowCompleted) was added in Round 10w but never actually
+      // applied here - the class was defined and styled but nothing ever put it on the row.
+      tr.className = 'rowType-'+o.type + (o.noWork ? ' rowNoWork' : '') + ((o.cells && o.cells.completed) ? ' rowCompleted' : '');
       cols.forEach(function(col){
         var td = document.createElement('td');
         var locked = !!o.noWork || col.kind==='locked';

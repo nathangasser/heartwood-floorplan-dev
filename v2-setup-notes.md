@@ -1398,6 +1398,36 @@ side by side and confirm they read clearly at normal zoom (not just close up); f
 couple times and confirm the drawing updates immediately; mark a row complete and confirm the tint
 shows even in edited text cells, not just the checkbox cell.
 
+## Round 10x - three fixes from field feedback on Round 10w - BUILT, frontend only
+
+1. **Double Hung jamb edges poking past the wall face.** Round 10w doubled `half` for Double Hung
+   windows to give the new 3-line symbol room, but `half` is also what the cutout polygon and the
+   jamb end ticks (the short black lines marking the wall's actual interior/exterior faces) are
+   built from - so doubling it pushed those past the true wall face too, which looked wrong (every
+   other window type's ticks correctly stop right at the face). Fixed by leaving `half` alone for
+   every opening type again - the "stacked" look now comes entirely from the 3-line spacing fitting
+   within the same footprint every other window uses, not from widening the opening itself. The
+   line offsets (`half*0.55`) recompute automatically off the now-unchanged `half`, landing close to
+   the original two-line spread (~4 units either way, same as before).
+
+2. **Issue log byline.** Three changes to the meta line under each issue's message: dropped its
+   font-weight from bold to normal (it was already `var(--muted)` gray, but bold gray at that size
+   was still pulling the eye ahead of the message itself); a new `shortIssueUser()` strips a
+   trailing `@heartwoodrestore.com` case-insensitively for display only (the full address is
+   untouched in storage - this is purely how it's shown); a new `shortIssueTime()` formats with
+   `toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})` instead of the default
+   `toLocaleString()`, which drops the seconds. Verified both helpers directly (domain strips
+   case-insensitively, a non-Heartwood email is left alone, missing values fall back to
+   "Unknown"/empty string without crashing, and the time output has no seconds component).
+
+3. **Completed-row green tint wasn't showing.** Root cause: Round 10w added the CSS rule
+   (`.rowCompleted`) but never actually added the `rowCompleted` class to the row - the styling was
+   real, nothing was ever there to apply it to. One-line fix to the `tr.className` assignment in
+   `buildSchedule`, checking `o.cells.completed`. Verified directly against a few opening shapes,
+   including one with no `cells` at all, to confirm it doesn't throw.
+
+`node --check` clean. Frontend only - no Lambda involved in any of these three.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).
