@@ -4698,7 +4698,10 @@ function exportPdf(){
 
 function generateRealPdf(){
   var jsPDFCtor = window.jspdf.jsPDF;
-  var doc = new jsPDFCtor({unit:'pt', format:'letter'});
+  // Whole PDF is landscape now - level plan pages and Window Schedule pages alike. Mixed
+  // orientations within one PDF confused the printer Nathan uses; landscape throughout also
+  // gives floor plans (usually wider than tall) more room than portrait did.
+  var doc = new jsPDFCtor({unit:'pt', format:'letter', orientation:'landscape'});
   var pageW = doc.internal.pageSize.getWidth();
   var pageH = doc.internal.pageSize.getHeight();
   var margin = 40;
@@ -4747,7 +4750,7 @@ function generateRealPdf(){
       if(y===null){
         y = drawPdfPageHeader(lvl.name);
       } else {
-        doc.addPage();
+        doc.addPage('letter', 'landscape');
         y = drawPdfPageHeader(lvl.name);
       }
 
@@ -4760,9 +4763,8 @@ function generateRealPdf(){
       }
     });
 
-    // Window Schedule pages are landscape - wider rows mean less text truncation - while the
-    // level plan pages above stay portrait/letter. jsPDF allows format/orientation to vary
-    // page-to-page, so this only affects pages from here on.
+    // Window Schedule pages stay landscape too (whole document is landscape now) - wider rows
+    // still mean less text truncation here than the schedule ever had in portrait.
     var colsMeta = allColumnsForDisplay().map(function(c){
       return {key:c.key, label:(c.pdfLabel||c.label), kind:c.kind};
     });

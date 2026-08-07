@@ -1518,6 +1518,19 @@ wrapped row heights, multi-line draw calls actually firing for long text, and th
 correctly starts a new landscape page with a redrawn header. All cases passed. `node --check`
 clean on the extracted script. Frontend only.
 
+## Round 11c - Whole PDF landscape (level plans + schedule) - BUILT
+Round 11b made only the Window Schedule pages landscape, leaving level plan pages portrait -
+Nathan's printer didn't handle the mixed orientation within one PDF well.
+
+Made everything landscape: the `jsPDFCtor` constructor now passes `orientation:'landscape'`, and
+both `doc.addPage()` call sites (level-page breaks, schedule-page breaks) now explicitly pass
+`('letter','landscape')` instead of relying on default/no-arg behavior. Bonus: floor plans
+(usually wider than tall) now get the wider landscape box on their pages too, not just the
+schedule.
+
+`node --check` clean; confirmed via grep that all three page-creation sites (constructor + both
+addPage call sites) are landscape. Frontend only.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).
