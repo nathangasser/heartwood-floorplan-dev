@@ -1485,6 +1485,39 @@ Window Schedule table (its own page(s) after the level pages) is untouched.
 
 `node --check` clean on extracted script. Frontend only.
 
+## Round 11b - PDF Window Schedule: landscape, no more truncated text, level headings - BUILT
+Nathan flagged two more PDF issues after the one-page-per-level fix: (1) narrow portrait columns
+were cutting field text off after one line, and (2) the schedule's Level column was redundant
+clutter now that each level already gets its own plan page.
+
+Window Schedule pages now switch to landscape (jsPDF supports per-page format/orientation, so
+the level-plan pages above stay portrait/letter unaffected) - `pageW`/`pageH` are recomputed off
+`doc.internal.pageSize` right after each landscape `addPage()` call, which also gives ~35% more
+usable column width per field.
+
+Removed the synthetic Level column entirely. Each level now gets a bold heading line ahead of
+its group of rows instead (skipped entirely for levels with zero openings, so there's no empty
+heading floating with nothing under it).
+
+Row rendering no longer truncates to a single line: every cell's text is wrapped with jsPDF's
+own `splitTextToSize` up front, the row height grows to fit the tallest wrapped column
+(`maxLines*TEXT_LINE_H + 12`, calibrated so a plain single-line row still lands at the original
+22pt), and ALL wrapped lines get drawn rather than just the first. A 150-character hard cap
+(with an ellipsis) still applies per field, per Nathan's "reasonable limit" - keeps one
+pathological wall of text from blowing a row up indefinitely, while anything under that wraps
+and prints in full.
+
+Pagination also moved from a post-draw check to a pre-draw check - previously a row could start
+drawing before the code noticed it didn't fit and only cut off/pushed content on the NEXT row.
+Now height is computed first, and if it won't fit the remaining page, a new landscape page
+(header + column-title row) starts before that row is drawn at all.
+
+Verified via an isolated Node re-implementation test (mocked jsPDF `doc`: wrap simulation,
+page/orientation tracking) covering the 150-char clamp, landscape page dimensions, standard vs.
+wrapped row heights, multi-line draw calls actually firing for long text, and that pagination
+correctly starts a new landscape page with a redrawn header. All cases passed. `node --check`
+clean on the extracted script. Frontend only.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).

@@ -4760,30 +4760,65 @@ function generateRealPdf(){
       }
     });
 
-    doc.addPage();
-    var yy = drawPdfPageHeader('Window Schedule');
-
-    // colsMeta[0] is the synthetic Level column; the rest mirror allColumnsForDisplay().
-    var colsMeta = [{key:'__level', label:'Level', kind:'text'}].concat(allColumnsForDisplay().map(function(c){
+    // Window Schedule pages are landscape - wider rows mean less text truncation - while the
+    // level plan pages above stay portrait/letter. jsPDF allows format/orientation to vary
+    // page-to-page, so this only affects pages from here on.
+    var colsMeta = allColumnsForDisplay().map(function(c){
       return {key:c.key, label:(c.pdfLabel||c.label), kind:c.kind};
-    }));
-    var textAreaW = pageW - margin*2;
-    var colW = textAreaW / colsMeta.length;
+    });
     var rowH = 22;
+    var TEXT_LINE_H = 10;
     var CHK_SIZE = 8;
+    var MAX_FIELD_CHARS = 150;
+    var colW, yy;
 
-    function drawRow(colsMeta, values, bold, noWork){
+    // A hard cap rather than true-unlimited wrapping - keeps one pathologically long note from
+    // blowing a row up indefinitely. Anything under this still wraps and prints in full below.
+    function clampFieldText(s){
+      s = String(s||'');
+      return s.length > MAX_FIELD_CHARS ? s.slice(0, MAX_FIELD_CHARS) + '…' : s;
+    }
+
+    function drawColumnHeaderRow(){
+      drawRow(colsMeta.map(function(c){ return c.label; }), true, false);
+    }
+
+    function newSchedulePage(){
+      doc.addPage('letter', 'landscape');
+      pageW = doc.internal.pageSize.getWidth();
+      pageH = doc.internal.pageSize.getHeight();
+      colW = (pageW - margin*2) / colsMeta.length;
+      yy = drawPdfPageHeader('Window Schedule');
+      drawColumnHeaderRow();
+    }
+
+    // Every column's text is wrapped up front so the row can be drawn tall enough to fit ALL of
+    // it, not just a first line - previously anything past line one was silently dropped.
+    function drawRow(values, bold, noWork){
       doc.setFont('helvetica', bold?'bold':'normal');
       doc.setFontSize(8);
+      var wrapped = colsMeta.map(function(c, i){
+        if(c.kind==='checkbox' && !bold) return null;
+        return doc.splitTextToSize(String(values[i]||''), colW-6);
+      });
+      var maxLines = wrapped.reduce(function(m, lines){ return lines ? Math.max(m, lines.length) : m; }, 1);
+      // +12 calibrated so a single-line row lands exactly at rowH (22), matching the original
+      // fixed-height spacing - only rows that actually wrap grow taller than that.
+      var thisRowH = Math.max(rowH, maxLines*TEXT_LINE_H + 12);
+
+      // Pre-check: paginate BEFORE drawing so a tall wrapped row never gets cut off at the
+      // bottom of a page (the old post-draw check let that happen).
+      if(yy + thisRowH > pageH - margin){ newSchedulePage(); }
+
       if(noWork){
         doc.setFillColor(246,244,238); // matches --panel
-        doc.rect(margin, yy, pageW-margin*2, rowH-3, 'F');
+        doc.rect(margin, yy, pageW-margin*2, thisRowH-3, 'F');
         doc.setTextColor(75,80,88); // matches --muted
       }
       var x = margin;
       colsMeta.forEach(function(c, i){
         if(c.kind==='checkbox' && !bold){
-          var cx = x+colW/2-CHK_SIZE/2, cy = yy+(rowH-3)/2-CHK_SIZE/2;
+          var cx = x+colW/2-CHK_SIZE/2, cy = yy+(thisRowH-3)/2-CHK_SIZE/2;
           doc.setDrawColor(noWork?150:120,noWork?150:120,noWork?150:120);
           if(values[i]){
             doc.setFillColor(noWork?120:40, noWork?120:40, noWork?120:40);
@@ -4792,27 +4827,36 @@ function generateRealPdf(){
             doc.rect(cx, cy, CHK_SIZE, CHK_SIZE, 'D');
           }
         } else {
-          var lines = doc.splitTextToSize(String(values[i]||''), colW-6);
-          doc.text(lines[0]||'', x+3, yy+13);
+          (wrapped[i]||['']).forEach(function(line, li){
+            doc.text(line, x+3, yy+13+li*TEXT_LINE_H);
+          });
         }
         x += colW;
       });
       if(noWork){ doc.setTextColor(20,23,28); }
       doc.setDrawColor(200,200,200);
-      doc.line(margin, yy+rowH-3, pageW-margin, yy+rowH-3);
-      yy += rowH;
-      if(yy > pageH - margin){ doc.addPage(); yy = drawPdfPageHeader('Window Schedule'); }
+      doc.line(margin, yy+thisRowH-3, pageW-margin, yy+thisRowH-3);
+      yy += thisRowH;
     }
 
-    drawRow(colsMeta, colsMeta.map(function(c){ return c.label; }), true, false);
+    newSchedulePage();
+    // No Level column per row anymore - instead each level gets its own heading, and its
+    // openings are grouped directly underneath.
     state.levels.forEach(function(lvl){
-      sortedOpenings(lvl.openings).forEach(function(o){
+      var openings = sortedOpenings(lvl.openings);
+      if(!openings.length) return;
+      var headingH = 20;
+      if(yy + headingH > pageH - margin){ newSchedulePage(); }
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(11);
+      doc.setTextColor(20,23,28);
+      doc.text(lvl.name, margin, yy+12);
+      yy += headingH;
+      openings.forEach(function(o){
         var values = colsMeta.map(function(c){
-          if(c.key==='__level') return lvl.name;
           if(c.kind==='checkbox') return !!(o.cells && o.cells[c.key]);
-          return (o.cells && o.cells[c.key]) || '';
+          return clampFieldText((o.cells && o.cells[c.key]) || '');
         });
-        drawRow(colsMeta, values, false, !!o.noWork);
+        drawRow(values, false, !!o.noWork);
       });
     });
 
