@@ -4739,24 +4739,16 @@ function generateRealPdf(){
 
   Promise.all(state.levels.map(function(lvl){ return svgToPngDataUrl(lvl, 1.5); }))
   .then(function(images){
-    // Levels flow onto the same page when there's room, instead of forcing a page break for
-    // every one - only starts a fresh page when there isn't reasonable space left for the
-    // next level's plan. A level that continues on the same page as the previous one just
-    // gets its name as a small heading, not the full logo/title/address/date block again.
-    var MIN_IMG_H = 120;
+    // Each level gets its own page, full logo/title/address/date header included - no more
+    // cramming a second level's plan as a small thumbnail under the first when it happens to fit.
     var y = null;
     state.levels.forEach(function(lvl, i){
       var img = images[i];
       if(y===null){
         y = drawPdfPageHeader(lvl.name);
-      } else if(pageH - margin - y < MIN_IMG_H + 30){
+      } else {
         doc.addPage();
         y = drawPdfPageHeader(lvl.name);
-      } else {
-        y += 14;
-        doc.setFont('helvetica','bold'); doc.setFontSize(13);
-        doc.text(lvl.name, margin, y);
-        y += 16;
       }
 
       if(img){

@@ -1472,6 +1472,19 @@ Verified the opacity lookup and color/text branching in isolation via Node (all 
 map correctly, completed/issues-only paths unaffected). `node --check` clean on the extracted
 script block. Frontend only - no Lambda changes.
 
+## Round 11a - PDF: one page per level - BUILT
+Previous logic let a second level flow onto the same page as the first whenever there was
+"enough room" (a MIN_IMG_H=120 threshold) - in practice this meant a second-floor plan often
+landed as a small thumbnail crammed under the first level instead of getting its own page.
+Nathan flagged this while reviewing PDF exports post-beta.
+
+Simplified: every level now always starts a fresh page via `doc.addPage()`, with the full
+logo/title/address/date header repeated each time (previously a same-page continuation got
+only a small heading, no full header). Removed the now-unused MIN_IMG_H threshold entirely.
+Window Schedule table (its own page(s) after the level pages) is untouched.
+
+`node --check` clean on extracted script. Frontend only.
+
 ## Session paused here - queue for next time
 - Retest this round's three fixes together on beta: banner dismiss lag, "Window Schedule"
   rename, and window/door/label/interior-item drag jankiness (see sections above for each).
